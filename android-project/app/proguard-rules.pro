@@ -1,0 +1,3 @@
+-keep class com.island.app.model.** { *; }
+-keep class com.island.app.data.** { *; }
+-dontwarn kotlinx.coroutines.**
