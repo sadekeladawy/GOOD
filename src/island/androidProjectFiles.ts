@@ -12,11 +12,15 @@ import stringsXml from '../../android-project/app/src/main/res/values/strings.xm
 import themesXml from '../../android-project/app/src/main/res/values/themes.xml?raw';
 import colorsXml from '../../android-project/app/src/main/res/values/colors.xml?raw';
 import icLauncherXml from '../../android-project/app/src/main/res/drawable/ic_island_launcher.xml?raw';
+import icLauncherBgXml from '../../android-project/app/src/main/res/drawable/ic_island_launcher_bg.xml?raw';
+import icLauncherFgXml from '../../android-project/app/src/main/res/drawable/ic_island_launcher_fg.xml?raw';
+import icLauncherAdaptiveXml from '../../android-project/app/src/main/res/drawable-v26/ic_island_launcher.xml?raw';
 import icNotifXml from '../../android-project/app/src/main/res/drawable/ic_island_notification.xml?raw';
 import backupRulesXml from '../../android-project/app/src/main/res/xml/backup_rules.xml?raw';
 import dataExtractionXml from '../../android-project/app/src/main/res/xml/data_extraction_rules.xml?raw';
 import islandAppKt from '../../android-project/app/src/main/java/com/island/app/IslandApplication.kt?raw';
 import mainActivityKt from '../../android-project/app/src/main/java/com/island/app/MainActivity.kt?raw';
+import crashLoggerKt from '../../android-project/app/src/main/java/com/island/app/data/CrashLogger.kt?raw';
 import islandSettingsKt from '../../android-project/app/src/main/java/com/island/app/data/IslandSettings.kt?raw';
 import settingsRepoKt from '../../android-project/app/src/main/java/com/island/app/data/SettingsRepository.kt?raw';
 import islandEventKt from '../../android-project/app/src/main/java/com/island/app/model/IslandEvent.kt?raw';
@@ -181,6 +185,13 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
     content: islandAppKt,
   },
   {
+    path: 'app/src/main/java/com/island/app/data/CrashLogger.kt',
+    name: 'CrashLogger.kt',
+    category: 'Data & Resources',
+    language: 'kotlin',
+    content: crashLoggerKt,
+  },
+  {
     path: 'app/src/main/java/com/island/app/data/IslandSettings.kt',
     name: 'IslandSettings.kt',
     category: 'Data & Resources',
@@ -221,6 +232,27 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
     category: 'Data & Resources',
     language: 'xml',
     content: colorsXml,
+  },
+  {
+    path: 'app/src/main/res/drawable-v26/ic_island_launcher.xml',
+    name: 'drawable-v26/ic_island_launcher.xml',
+    category: 'Data & Resources',
+    language: 'xml',
+    content: icLauncherAdaptiveXml,
+  },
+  {
+    path: 'app/src/main/res/drawable/ic_island_launcher_bg.xml',
+    name: 'ic_island_launcher_bg.xml',
+    category: 'Data & Resources',
+    language: 'xml',
+    content: icLauncherBgXml,
+  },
+  {
+    path: 'app/src/main/res/drawable/ic_island_launcher_fg.xml',
+    name: 'ic_island_launcher_fg.xml',
+    category: 'Data & Resources',
+    language: 'xml',
+    content: icLauncherFgXml,
   },
   {
     path: 'app/src/main/res/drawable/ic_island_launcher.xml',

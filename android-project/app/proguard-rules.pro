@@ -1,3 +1,3 @@
--keep class com.island.app.model.** { *; }
--keep class com.island.app.data.** { *; }
+-keep class com.island.app.** { *; }
+-keep class androidx.datastore.** { *; }
 -dontwarn kotlinx.coroutines.**

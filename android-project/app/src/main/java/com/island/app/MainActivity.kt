@@ -3,6 +3,7 @@ package com.island.app
 import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -16,7 +17,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.island.app.data.CrashLogger
 import com.island.app.data.IslandSettings
 import com.island.app.service.IslandEventBus
 import com.island.app.service.IslandNotificationListenerService
@@ -29,6 +32,8 @@ class MainActivity : ComponentActivity() {
 
     private var hasOverlayPermission by mutableStateOf(false)
     private var hasNotificationAccess by mutableStateOf(false)
+    private var lastCrashLog by mutableStateOf<String?>(null)
+    private var permissionsRequestedOnce = false
 
     private val runtimePermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -38,8 +43,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        requestRuntimePermissions()
+        runCatching { enableEdgeToEdge() }
+
+        refreshPermissionsAndService()
+        lastCrashLog = CrashLogger.readLastCrash(this)
+
+        if (savedInstanceState == null && !permissionsRequestedOnce) {
+            permissionsRequestedOnce = true
+            requestMissingRuntimePermissions()
+        }
 
         val repo = (application as IslandApplication).settingsRepository
 
@@ -62,6 +74,11 @@ class MainActivity : ComponentActivity() {
                     settings = settings,
                     hasOverlayPermission = hasOverlayPermission,
                     hasNotificationAccess = hasNotificationAccess,
+                    lastCrashLog = lastCrashLog,
+                    onClearCrashLog = {
+                        CrashLogger.clearLastCrash(this@MainActivity)
+                        lastCrashLog = null
+                    },
                     onRequestOverlayPermission = { openOverlaySettings() },
                     onRequestNotificationAccess = { openNotificationListenerSettings() },
                     onMasterToggle = { enabled ->
@@ -96,11 +113,12 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshPermissionsAndService()
+        lastCrashLog = CrashLogger.readLastCrash(this)
     }
 
     private fun refreshPermissionsAndService() {
-        hasOverlayPermission = Settings.canDrawOverlays(this)
-        hasNotificationAccess = isNotificationListenerEnabled()
+        hasOverlayPermission = runCatching { Settings.canDrawOverlays(this) }.getOrDefault(false)
+        hasNotificationAccess = runCatching { isNotificationListenerEnabled() }.getOrDefault(false)
     }
 
     private fun isNotificationListenerEnabled(): Boolean {
@@ -114,27 +132,39 @@ class MainActivity : ComponentActivity() {
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
             Uri.parse("package:$packageName")
         )
-        startActivity(intent)
+        runCatching { startActivity(intent) }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)) }
+        }
     }
 
     private fun openNotificationListenerSettings() {
-        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        runCatching {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
     }
 
-    private fun requestRuntimePermissions() {
-        val needed = buildList {
+    private fun requestMissingRuntimePermissions() {
+        val candidates = buildList {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 add(Manifest.permission.BLUETOOTH_CONNECT)
             }
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.READ_PHONE_STATE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 add(Manifest.permission.ANSWER_PHONE_CALLS)
             }
         }
-        runtimePermissionsLauncher.launch(needed.toTypedArray())
+        val missing = candidates.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            runCatching { runtimePermissionsLauncher.launch(missing.toTypedArray()) }
+        }
     }
 }

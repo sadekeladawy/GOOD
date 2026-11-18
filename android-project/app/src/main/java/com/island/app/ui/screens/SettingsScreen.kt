@@ -59,6 +59,8 @@ fun SettingsScreen(
     settings: IslandSettings,
     hasOverlayPermission: Boolean,
     hasNotificationAccess: Boolean,
+    lastCrashLog: String? = null,
+    onClearCrashLog: () -> Unit = {},
     onRequestOverlayPermission: () -> Unit,
     onRequestNotificationAccess: () -> Unit,
     onMasterToggle: (Boolean) -> Unit,
@@ -142,10 +144,48 @@ fun SettingsScreen(
             )
 
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                if (!lastCrashLog.isNullOrBlank()) {
+                    item {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.errorContainer
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Last Diagnostics Log",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                    OutlinedButton(onClick = onClearCrashLog) {
+                                        Text("Dismiss")
+                                    }
+                                }
+                                Text(
+                                    text = lastCrashLog.take(600),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if (!hasOverlayPermission || !hasNotificationAccess) {
                     item {
                         PermissionsSection(
@@ -421,7 +461,7 @@ private fun SettingSliderRow(
             )
         }
         Slider(
-            value = value,
+            value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onValueChange,
             valueRange = range
         )

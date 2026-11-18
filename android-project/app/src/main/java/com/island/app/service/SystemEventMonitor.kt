@@ -14,6 +14,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
@@ -21,10 +22,12 @@ import android.provider.Settings
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
+import com.island.app.data.CrashLogger
 import com.island.app.model.IslandEvent
 import com.island.app.model.RingerMode
 import com.island.app.state.IslandStateManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -34,11 +37,11 @@ class SystemEventMonitor(
     private val stateManager: IslandStateManager
 ) {
     private val connectivityManager =
-        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private val wifiManager =
-        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
     private val audioManager =
-        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
     private var lastChargingState: Boolean? = null
     private var lastBatteryLevel: Int = -1
@@ -48,72 +51,110 @@ class SystemEventMonitor(
     private var lastWifiConnected: Boolean? = null
     private var lastWifiSsid: String? = null
     private var lastHotspotEnabled: Boolean? = null
-    private var lastRingerMode: Int = audioManager.ringerMode
+    private var lastRingerMode: Int = runCatching {
+        audioManager?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
+    }.getOrDefault(AudioManager.RINGER_MODE_NORMAL)
     private var lastAirplaneMode: Boolean? = null
     private var isRegistered = false
+    private var callCommandJob: Job? = null
 
     private val systemReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
-            when (intent.action) {
-                Intent.ACTION_POWER_CONNECTED -> {
-                    val pct = readCurrentBatteryPercent()
-                    lastChargingState = true
-                    warned20 = false
-                    warned10 = false
-                    stateManager.postEvent(IslandEvent.ChargingStarted(pct))
-                }
-
-                Intent.ACTION_POWER_DISCONNECTED -> {
-                    val pct = readCurrentBatteryPercent()
-                    lastChargingState = false
-                    notifiedFull = false
-                    stateManager.postEvent(IslandEvent.ChargingStopped(pct))
-                }
-
-                Intent.ACTION_BATTERY_CHANGED -> handleBatteryChanged(intent)
-
-                "android.net.wifi.WIFI_AP_STATE_CHANGED" -> handleHotspotChanged(intent)
-
-                BluetoothDevice.ACTION_ACL_CONNECTED -> handleBluetoothEvent(intent, connected = true)
-                BluetoothDevice.ACTION_ACL_DISCONNECTED -> handleBluetoothEvent(intent, connected = false)
-
-                Intent.ACTION_AIRPLANE_MODE_CHANGED -> {
-                    val enabled = intent.getBooleanExtra("state", isAirplaneModeOn())
-                    if (lastAirplaneMode != enabled) {
-                        lastAirplaneMode = enabled
-                        stateManager.postEvent(IslandEvent.AirplaneModeChanged(enabled))
+            runCatching {
+                when (intent.action) {
+                    Intent.ACTION_POWER_CONNECTED -> {
+                        val pct = readCurrentBatteryPercent()
+                        lastChargingState = true
+                        warned20 = false
+                        warned10 = false
+                        stateManager.postEvent(IslandEvent.ChargingStarted(pct))
                     }
-                }
 
-                AudioManager.RINGER_MODE_CHANGED_ACTION -> {
-                    val mode = intent.getIntExtra(AudioManager.EXTRA_RINGER_MODE, audioManager.ringerMode)
-                    if (lastRingerMode != mode) {
-                        lastRingerMode = mode
-                        val mapped = when (mode) {
-                            AudioManager.RINGER_MODE_SILENT -> RingerMode.SILENT
-                            AudioManager.RINGER_MODE_VIBRATE -> RingerMode.VIBRATE
-                            else -> RingerMode.RING
+                    Intent.ACTION_POWER_DISCONNECTED -> {
+                        val pct = readCurrentBatteryPercent()
+                        lastChargingState = false
+                        notifiedFull = false
+                        stateManager.postEvent(IslandEvent.ChargingStopped(pct))
+                    }
+
+                    Intent.ACTION_BATTERY_CHANGED -> handleBatteryChanged(intent)
+
+                    "android.net.wifi.WIFI_AP_STATE_CHANGED" -> handleHotspotChanged(intent)
+
+                    BluetoothDevice.ACTION_ACL_CONNECTED -> handleBluetoothEvent(intent, connected = true)
+                    BluetoothDevice.ACTION_ACL_DISCONNECTED -> handleBluetoothEvent(intent, connected = false)
+
+                    Intent.ACTION_AIRPLANE_MODE_CHANGED -> {
+                        val enabled = intent.getBooleanExtra("state", isAirplaneModeOn())
+                        if (lastAirplaneMode != enabled) {
+                            lastAirplaneMode = enabled
+                            stateManager.postEvent(IslandEvent.AirplaneModeChanged(enabled))
                         }
-                        stateManager.postEvent(IslandEvent.RingerModeChanged(mapped))
                     }
-                }
 
-                TelephonyManager.ACTION_PHONE_STATE_CHANGED -> handlePhoneState(intent)
+                    AudioManager.RINGER_MODE_CHANGED_ACTION -> {
+                        val fallbackMode = runCatching {
+                            audioManager?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
+                        }.getOrDefault(AudioManager.RINGER_MODE_NORMAL)
+                        val mode = intent.getIntExtra(AudioManager.EXTRA_RINGER_MODE, fallbackMode)
+                        if (lastRingerMode != mode) {
+                            lastRingerMode = mode
+                            val mapped = when (mode) {
+                                AudioManager.RINGER_MODE_SILENT -> RingerMode.SILENT
+                                AudioManager.RINGER_MODE_VIBRATE -> RingerMode.VIBRATE
+                                else -> RingerMode.RING
+                            }
+                            stateManager.postEvent(IslandEvent.RingerModeChanged(mapped))
+                        }
+                    }
+
+                    TelephonyManager.ACTION_PHONE_STATE_CHANGED -> handlePhoneState(intent)
+                }
+            }.onFailure {
+                CrashLogger.recordNonFatal(context, "BroadcastReceiver error for ${intent.action}", it)
             }
         }
     }
 
-    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            val ssid = resolveCurrentWifiSsid()
+    private val wifiCallback: ConnectivityManager.NetworkCallback =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            object : ConnectivityManager.NetworkCallback(
+                ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO
+            ) {
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    val transportWifi = caps.transportInfo as? WifiInfo
+                    val ssid = sanitizeSsid(transportWifi?.ssid) ?: resolveCurrentWifiSsid()
+                    dispatchWifiConnected(ssid)
+                }
+
+                override fun onLost(network: Network) {
+                    dispatchWifiLost()
+                }
+            }
+        } else {
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    dispatchWifiConnected(resolveCurrentWifiSsid())
+                }
+
+                override fun onLost(network: Network) {
+                    dispatchWifiLost()
+                }
+            }
+        }
+
+    private fun dispatchWifiConnected(ssid: String) {
+        scope.launch {
             if (lastWifiConnected != true || lastWifiSsid != ssid) {
                 lastWifiConnected = true
                 lastWifiSsid = ssid
                 stateManager.postEvent(IslandEvent.WifiConnected(ssid = ssid))
             }
         }
+    }
 
-        override fun onLost(network: Network) {
+    private fun dispatchWifiLost() {
+        scope.launch {
             if (lastWifiConnected == true) {
                 lastWifiConnected = false
                 val prev = lastWifiSsid
@@ -138,19 +179,24 @@ class SystemEventMonitor(
             addAction(AudioManager.RINGER_MODE_CHANGED_ACTION)
             addAction(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
         }
-        ContextCompat.registerReceiver(
-            context,
-            systemReceiver,
-            filter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
+        runCatching {
+            ContextCompat.registerReceiver(
+                context,
+                systemReceiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
+        }.onFailure {
+            CrashLogger.recordNonFatal(context, "registerReceiver failed", it)
+        }
 
         val wifiRequest = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .build()
-        runCatching { connectivityManager.registerNetworkCallback(wifiRequest, wifiCallback) }
+        runCatching { connectivityManager?.registerNetworkCallback(wifiRequest, wifiCallback) }
 
-        scope.launch {
+        callCommandJob?.cancel()
+        callCommandJob = scope.launch {
             IslandEventBus.callCommands.collectLatest { cmd ->
                 handleCallCommand(cmd)
             }
@@ -160,8 +206,10 @@ class SystemEventMonitor(
     fun stop() {
         if (!isRegistered) return
         isRegistered = false
+        callCommandJob?.cancel()
+        callCommandJob = null
         runCatching { context.unregisterReceiver(systemReceiver) }
-        runCatching { connectivityManager.unregisterNetworkCallback(wifiCallback) }
+        runCatching { connectivityManager?.unregisterNetworkCallback(wifiCallback) }
     }
 
     private fun handleBatteryChanged(intent: Intent) {
@@ -202,7 +250,6 @@ class SystemEventMonitor(
 
     private fun handleHotspotChanged(intent: Intent) {
         val state = intent.getIntExtra("wifi_state", -1)
-        // WIFI_AP_STATE_ENABLED = 13, WIFI_AP_STATE_DISABLED = 11
         val enabled = when (state) {
             13 -> true
             11 -> false
@@ -230,21 +277,28 @@ class SystemEventMonitor(
             return
         }
 
-        val device: BluetoothDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-        } ?: return
+        val device: BluetoothDevice? = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            }
+        }.getOrNull() ?: return
 
-        val majorClass = device.bluetoothClass?.majorDeviceClass
-        val deviceClass = device.bluetoothClass?.deviceClass
-        val isAudio = majorClass == BluetoothClass.Device.Major.AUDIO_VIDEO ||
-            deviceClass == BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES ||
-            deviceClass == BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET ||
-            deviceClass == BluetoothClass.Device.AUDIO_VIDEO_LOUDSPEAKER
+        val isAudio = runCatching {
+            val majorClass = device.bluetoothClass?.majorDeviceClass
+            val deviceClass = device.bluetoothClass?.deviceClass
+            majorClass == BluetoothClass.Device.Major.AUDIO_VIDEO ||
+                deviceClass == BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES ||
+                deviceClass == BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET ||
+                deviceClass == BluetoothClass.Device.AUDIO_VIDEO_LOUDSPEAKER
+        }.getOrDefault(false)
 
-        val name = device.name?.takeIf { it.isNotBlank() } ?: "Bluetooth Device"
+        val name = runCatching {
+            device.name?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: "Bluetooth Device"
+
         stateManager.postEvent(
             IslandEvent.BluetoothChanged(
                 deviceName = name,
@@ -260,7 +314,9 @@ class SystemEventMonitor(
         when (state) {
             TelephonyManager.EXTRA_STATE_RINGING -> {
                 @Suppress("DEPRECATION")
-                val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER) ?: "Private Number"
+                val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "Incoming Call"
                 stateManager.postEvent(
                     IslandEvent.IncomingCall(
                         callerName = number,
@@ -277,27 +333,31 @@ class SystemEventMonitor(
 
     @SuppressLint("MissingPermission")
     private fun handleCallCommand(command: CallCommand) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            stateManager.clearIncomingCall()
+            return
+        }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             stateManager.clearIncomingCall()
             return
         }
-        val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager ?: return
+        val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
         runCatching {
             when (command) {
-                CallCommand.Accept -> telecom.acceptRingingCall()
-                CallCommand.Decline -> telecom.endCall()
+                CallCommand.Accept -> telecom?.acceptRingingCall()
+                CallCommand.Decline -> telecom?.endCall()
             }
         }
         stateManager.clearIncomingCall()
     }
 
     private fun readCurrentBatteryPercent(): Int {
-        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val cap = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        return cap.coerceIn(0, 100)
+        return runCatching {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            (bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: 0).coerceIn(0, 100)
+        }.getOrDefault(0)
     }
 
     @Suppress("DEPRECATION")
@@ -306,10 +366,17 @@ class SystemEventMonitor(
             context, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
         if (!hasLocation) return "Wi-Fi Network"
-        val raw = wifiManager.connectionInfo?.ssid?.removePrefix("\"")?.removeSuffix("\"")
-        return if (raw.isNullOrBlank() || raw == "<unknown ssid>") "Wi-Fi Network" else raw
+        return runCatching {
+            sanitizeSsid(wifiManager?.connectionInfo?.ssid)
+        }.getOrNull() ?: "Wi-Fi Network"
     }
 
-    private fun isAirplaneModeOn(): Boolean =
+    private fun sanitizeSsid(raw: String?): String? {
+        val cleaned = raw?.removePrefix("\"")?.removeSuffix("\"")
+        return if (cleaned.isNullOrBlank() || cleaned == "<unknown ssid>") null else cleaned
+    }
+
+    private fun isAirplaneModeOn(): Boolean = runCatching {
         Settings.Global.getInt(context.contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) != 0
+    }.getOrDefault(false)
 }

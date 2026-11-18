@@ -662,7 +662,8 @@ private fun MusicPlayerCard(
             AnimatedEqualizer(isPlaying = event.isPlaying, color = IslandViolet)
         }
     } else {
-        val progress = (event.positionMs.toFloat() / event.durationMs.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+        val rawProgress = event.positionMs.toFloat() / event.durationMs.coerceAtLeast(1L).toFloat()
+        val progress = if (rawProgress.isFinite()) rawProgress.coerceIn(0f, 1f) else 0f
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -755,9 +756,12 @@ private fun MusicPlayerCard(
 @Composable
 private fun AlbumArtBox(event: IslandEvent.MusicPlayback, size: Dp, corner: Dp) {
     val art = event.albumArt
-    if (art != null) {
+    val validBitmap = remember(art) {
+        if (art != null && !art.isRecycled) runCatching { art.asImageBitmap() }.getOrNull() else null
+    }
+    if (validBitmap != null) {
         Image(
-            bitmap = art.asImageBitmap(),
+            bitmap = validBitmap,
             contentDescription = event.title,
             contentScale = ContentScale.Crop,
             modifier = Modifier

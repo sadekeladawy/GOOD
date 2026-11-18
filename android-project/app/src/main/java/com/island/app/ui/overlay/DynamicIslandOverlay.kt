@@ -142,17 +142,20 @@ fun DynamicIslandOverlay(
         )
     }
 
-    val shape = RoundedCornerShape(animatedCorner)
+    val safeWidth = animatedWidth.coerceAtLeast(1.dp)
+    val safeHeight = animatedHeight.coerceAtLeast(1.dp)
+    val safeCorner = animatedCorner.coerceAtLeast(0.dp)
+    val shape = RoundedCornerShape(safeCorner)
 
     Box(
         modifier = modifier
             .graphicsLayer {
-                alpha = visibilityAlpha
-                scaleX = visibilityScale
-                scaleY = visibilityScale
+                alpha = visibilityAlpha.coerceIn(0f, 1f)
+                scaleX = visibilityScale.coerceAtLeast(0.1f)
+                scaleY = visibilityScale.coerceAtLeast(0.1f)
             }
-            .width(animatedWidth)
-            .height(animatedHeight)
+            .width(safeWidth)
+            .height(safeHeight)
             .clip(shape)
             .background(Color.Black)
             .border(width = 0.75.dp, color = Color(0x26FFFFFF), shape = shape)
@@ -192,10 +195,15 @@ fun DynamicIslandOverlay(
                     .fillMaxSize()
                     .graphicsLayer {
                         val blurPx = morphBlur.value
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurPx > 0.5f) {
-                            renderEffect = RenderEffect
-                                .createBlurEffect(blurPx, blurPx, Shader.TileMode.CLAMP)
-                                .asComposeRenderEffect()
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurPx > 0.5f && blurPx.isFinite()) {
+                            val clamped = blurPx.coerceIn(0.5f, 12f)
+                            renderEffect = runCatching {
+                                RenderEffect
+                                    .createBlurEffect(clamped, clamped, Shader.TileMode.CLAMP)
+                                    .asComposeRenderEffect()
+                            }.getOrNull()
+                        } else {
+                            renderEffect = null
                         }
                     },
                 contentAlignment = Alignment.Center

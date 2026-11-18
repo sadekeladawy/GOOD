@@ -30,10 +30,17 @@ class IslandStateManager(
     private val _uiState = MutableStateFlow(IslandUiState())
     val uiState: StateFlow<IslandUiState> = _uiState.asStateFlow()
 
+    // Accessed strictly on scope's Main.immediate dispatcher to prevent ConcurrentModificationException
     private val eventQueue = ArrayDeque<IslandEvent>()
     private var autoCollapseJob: Job? = null
 
     fun postEvent(event: IslandEvent) {
+        scope.launch {
+            handlePostEvent(event)
+        }
+    }
+
+    private fun handlePostEvent(event: IslandEvent) {
         val settings = settingsProvider()
         if (!settings.masterEnabled || !settings.isEventEnabled(event.type)) {
             return
@@ -45,7 +52,6 @@ class IslandStateManager(
         }
 
         if (event is IslandEvent.IncomingCall) {
-            // Incoming calls preempt transient cards immediately
             eventQueue.removeAll { it is IslandEvent.IncomingCall }
             showImmediate(event, IslandDisplayMode.EXPANDED)
             return
@@ -55,7 +61,6 @@ class IslandStateManager(
         if (current == null || current is IslandEvent.MusicPlayback) {
             showImmediate(event, IslandDisplayMode.COMPACT)
         } else {
-            // Queue up to 4 events cleanly so rapid bursts swap smoothly
             if (eventQueue.size >= 4) {
                 eventQueue.removeFirst()
             }
@@ -65,12 +70,14 @@ class IslandStateManager(
     }
 
     fun clearIncomingCall() {
-        val current = _uiState.value.activeEvent
-        if (current is IslandEvent.IncomingCall) {
-            advanceOrCollapse()
-        } else {
-            eventQueue.removeAll { it is IslandEvent.IncomingCall }
-            _uiState.update { it.copy(queuedCount = eventQueue.size) }
+        scope.launch {
+            val current = _uiState.value.activeEvent
+            if (current is IslandEvent.IncomingCall) {
+                advanceOrCollapse()
+            } else {
+                eventQueue.removeAll { it is IslandEvent.IncomingCall }
+                _uiState.update { it.copy(queuedCount = eventQueue.size) }
+            }
         }
     }
 
@@ -127,8 +134,7 @@ class IslandStateManager(
         autoCollapseJob?.cancel()
         if (eventQueue.isNotEmpty()) {
             val next = eventQueue.removeFirst()
-            // Brief 120ms morph transition before presenting next queued card
-            scope.launch {
+            autoCollapseJob = scope.launch {
                 _uiState.update { it.copy(queuedCount = eventQueue.size) }
                 delay(120L)
                 showImmediate(
@@ -159,54 +165,59 @@ class IslandStateManager(
     }
 
     fun onIslandTap() {
-        val state = _uiState.value
-        val active = state.activeEvent ?: state.persistentMusic
-        when (state.displayMode) {
-            IslandDisplayMode.IDLE -> {
-                if (active != null) {
+        scope.launch {
+            val state = _uiState.value
+            val active = state.activeEvent ?: state.persistentMusic
+            when (state.displayMode) {
+                IslandDisplayMode.IDLE -> {
+                    if (active != null) {
+                        autoCollapseJob?.cancel()
+                        _uiState.update {
+                            it.copy(activeEvent = active, displayMode = IslandDisplayMode.EXPANDED)
+                        }
+                        if (!active.isSticky) {
+                            scheduleAutoCollapse(settingsProvider().displayDuration.millis + 1500L)
+                        }
+                    }
+                }
+                IslandDisplayMode.COMPACT -> {
                     autoCollapseJob?.cancel()
-                    _uiState.update {
-                        it.copy(activeEvent = active, displayMode = IslandDisplayMode.EXPANDED)
-                    }
-                    if (!active.isSticky) {
-                        scheduleAutoCollapse(settingsProvider().displayDuration.millis + 1500L)
+                    _uiState.update { it.copy(displayMode = IslandDisplayMode.EXPANDED) }
+                    if (active != null && !active.isSticky) {
+                        scheduleAutoCollapse(settingsProvider().displayDuration.millis + 2000L)
                     }
                 }
-            }
-            IslandDisplayMode.COMPACT -> {
-                autoCollapseJob?.cancel()
-                _uiState.update { it.copy(displayMode = IslandDisplayMode.EXPANDED) }
-                if (active != null && !active.isSticky) {
-                    scheduleAutoCollapse(settingsProvider().displayDuration.millis + 2000L)
-                }
-            }
-            IslandDisplayMode.EXPANDED -> {
-                collapse()
-            }
-            IslandDisplayMode.FULL_EXPANDED -> {
-                collapse()
+                IslandDisplayMode.EXPANDED,
+                IslandDisplayMode.FULL_EXPANDED -> collapseInternal()
             }
         }
     }
 
     fun onIslandLongPress() {
-        val state = _uiState.value
-        val active = state.activeEvent ?: state.persistentMusic ?: return
-        autoCollapseJob?.cancel()
-        _uiState.update {
-            it.copy(
-                activeEvent = active,
-                displayMode = IslandDisplayMode.FULL_EXPANDED
-            )
+        scope.launch {
+            val state = _uiState.value
+            val active = state.activeEvent ?: state.persistentMusic ?: return@launch
+            autoCollapseJob?.cancel()
+            _uiState.update {
+                it.copy(
+                    activeEvent = active,
+                    displayMode = IslandDisplayMode.FULL_EXPANDED
+                )
+            }
         }
     }
 
     fun collapse() {
+        scope.launch {
+            collapseInternal()
+        }
+    }
+
+    private fun collapseInternal() {
         autoCollapseJob?.cancel()
         val state = _uiState.value
         val music = state.persistentMusic
         if (state.activeEvent is IslandEvent.IncomingCall) {
-            // Keep incoming call visible in compact pill if collapsed
             _uiState.update { it.copy(displayMode = IslandDisplayMode.COMPACT) }
             return
         }
@@ -222,28 +233,32 @@ class IslandStateManager(
     }
 
     fun setFullscreenState(isFullscreen: Boolean) {
-        _uiState.update { it.copy(isFullscreenHidden = isFullscreen) }
+        scope.launch {
+            _uiState.update { it.copy(isFullscreenHidden = isFullscreen) }
+        }
     }
 
     fun onSettingsChanged(settings: IslandSettings) {
-        if (!settings.masterEnabled) {
-            autoCollapseJob?.cancel()
-            eventQueue.clear()
-            _uiState.update {
-                it.copy(
-                    activeEvent = null,
-                    displayMode = IslandDisplayMode.IDLE,
-                    queuedCount = 0
-                )
-            }
-        } else if (!settings.isEventEnabled(IslandEventType.MUSIC_PLAYER)) {
-            _uiState.update { state ->
-                val active = if (state.activeEvent is IslandEvent.MusicPlayback) null else state.activeEvent
-                state.copy(
-                    activeEvent = active,
-                    persistentMusic = null,
-                    displayMode = if (active == null) IslandDisplayMode.IDLE else state.displayMode
-                )
+        scope.launch {
+            if (!settings.masterEnabled) {
+                autoCollapseJob?.cancel()
+                eventQueue.clear()
+                _uiState.update {
+                    it.copy(
+                        activeEvent = null,
+                        displayMode = IslandDisplayMode.IDLE,
+                        queuedCount = 0
+                    )
+                }
+            } else if (!settings.isEventEnabled(IslandEventType.MUSIC_PLAYER)) {
+                _uiState.update { state ->
+                    val active = if (state.activeEvent is IslandEvent.MusicPlayback) null else state.activeEvent
+                    state.copy(
+                        activeEvent = active,
+                        persistentMusic = null,
+                        displayMode = if (active == null) IslandDisplayMode.IDLE else state.displayMode
+                    )
+                }
             }
         }
     }
