@@ -17,6 +17,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -66,7 +67,7 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     private lateinit var stateManager: IslandStateManager
     private lateinit var systemMonitor: SystemEventMonitor
 
-    private var overlayView: ComposeView? = null
+    private var overlayView: View? = null
     private var fullscreenProbeView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var currentSettings: IslandSettings = IslandSettings.Default
@@ -240,7 +241,7 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
             }
         }
 
-        val composeView = object : ComposeView(this) {
+        val container = object : FrameLayout(this) {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
                 if (event.action == MotionEvent.ACTION_OUTSIDE) {
                     stateManager.collapse()
@@ -248,7 +249,9 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                 }
                 return super.dispatchTouchEvent(event)
             }
-        }.apply {
+        }
+
+        val composeView = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@IslandOverlayService)
             setViewTreeSavedStateRegistryOwner(this@IslandOverlayService)
             setViewTreeViewModelStoreOwner(this@IslandOverlayService)
@@ -284,9 +287,14 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
             }
         }
 
+        container.addView(composeView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ))
+
         overlayParams = params
-        overlayView = composeView
-        windowManager.addView(composeView, params)
+        overlayView = container
+        windowManager.addView(container, params)
     }
 
     private fun updateOverlayPosition(settings: IslandSettings) {
