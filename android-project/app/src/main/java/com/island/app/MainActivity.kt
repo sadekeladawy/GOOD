@@ -72,9 +72,10 @@ class MainActivity : ComponentActivity() {
             val isMediaListenerConnected by viewModel.isMediaListenerConnected.collectAsStateWithLifecycle()
             val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsStateWithLifecycle()
             val activeMedia by viewModel.mediaState.collectAsStateWithLifecycle()
+            val cutoutMetrics by viewModel.cutoutMetrics.collectAsStateWithLifecycle()
 
-            LaunchedEffect(settings.masterEnabled, hasOverlayPermission) {
-                if (settings.masterEnabled && hasOverlayPermission) {
+            LaunchedEffect(settings.masterEnabled, hasOverlayPermission, isAccessibilityConnected) {
+                if (settings.masterEnabled && (hasOverlayPermission || isAccessibilityConnected)) {
                     IslandOverlayService.start(this@MainActivity)
                 } else {
                     IslandOverlayService.stop(this@MainActivity)
@@ -91,6 +92,7 @@ class MainActivity : ComponentActivity() {
             IslandTheme {
                 SettingsScreen(
                     settings = settings,
+                    cutoutMetrics = cutoutMetrics,
                     hasOverlayPermission = hasOverlayPermission,
                     hasNotificationAccess = hasNotificationAccess,
                     isMediaListenerConnected = isMediaListenerConnected,

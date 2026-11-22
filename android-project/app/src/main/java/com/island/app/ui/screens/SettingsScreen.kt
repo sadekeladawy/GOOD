@@ -35,7 +35,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +56,8 @@ import com.island.app.data.IslandEventType
 import com.island.app.data.IslandSettings
 import com.island.app.model.IslandDisplayMode
 import com.island.app.model.IslandEvent
+import com.island.app.service.CutoutMetrics
+import com.island.app.service.IslandEventBus
 import com.island.app.state.IslandUiState
 import com.island.app.ui.overlay.DynamicIslandOverlay
 import java.util.Locale
@@ -63,6 +67,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsScreen(
     settings: IslandSettings,
+    cutoutMetrics: CutoutMetrics = CutoutMetrics(),
     hasOverlayPermission: Boolean,
     hasNotificationAccess: Boolean,
     isMediaListenerConnected: Boolean,
@@ -93,14 +98,22 @@ fun SettingsScreen(
     var previewEvent by remember { mutableStateOf<IslandEvent?>(null) }
     var previewMode by remember { mutableStateOf(IslandDisplayMode.IDLE) }
 
-    // Hold slider values locally so dragging updates the live preview at 60/120fps
-    // without writing to DataStore on every pixel movement.
+    // Hold slider values locally AND stream them live to IslandOverlayService in memory
+    // so dragging updates the real floating island at 60/120fps without DataStore disk spam.
     var draftOffsetX by remember { mutableFloatStateOf(settings.offsetX) }
     var draftOffsetY by remember { mutableFloatStateOf(settings.offsetY) }
     var draftIdleWidth by remember { mutableFloatStateOf(settings.idleWidthDp) }
     var draftIdleHeight by remember { mutableFloatStateOf(settings.idleHeightDp) }
     var draftCornerRadius by remember { mutableFloatStateOf(settings.cornerRadiusDp) }
     var draftAnimationSpeed by remember { mutableFloatStateOf(settings.animationSpeed) }
+    val isLiveDragging by IslandEventBus.isLiveDraggingSettings.collectAsState()
+
+    DisposableEffect(Unit) {
+        onDispose {
+            IslandEventBus.setLiveDraggingSettings(false)
+            IslandEventBus.updateLiveSettingsPreview(null)
+        }
+    }
 
     LaunchedEffect(
         settings.offsetX,
@@ -110,12 +123,14 @@ fun SettingsScreen(
         settings.cornerRadiusDp,
         settings.animationSpeed
     ) {
-        draftOffsetX = settings.offsetX
-        draftOffsetY = settings.offsetY
-        draftIdleWidth = settings.idleWidthDp
-        draftIdleHeight = settings.idleHeightDp
-        draftCornerRadius = settings.cornerRadiusDp
-        draftAnimationSpeed = settings.animationSpeed
+        if (!IslandEventBus.isLiveDraggingSettings.value) {
+            draftOffsetX = settings.offsetX
+            draftOffsetY = settings.offsetY
+            draftIdleWidth = settings.idleWidthDp
+            draftIdleHeight = settings.idleHeightDp
+            draftCornerRadius = settings.cornerRadiusDp
+            draftAnimationSpeed = settings.animationSpeed
+        }
     }
 
     val previewSettings = settings.copy(
@@ -126,6 +141,33 @@ fun SettingsScreen(
         cornerRadiusDp = draftCornerRadius,
         animationSpeed = draftAnimationSpeed
     )
+
+    fun streamLiveDraft(
+        offsetX: Float = draftOffsetX,
+        offsetY: Float = draftOffsetY,
+        idleWidthDp: Float = draftIdleWidth,
+        idleHeightDp: Float = draftIdleHeight,
+        cornerRadiusDp: Float = draftCornerRadius,
+        animationSpeed: Float = draftAnimationSpeed
+    ) {
+        draftOffsetX = offsetX
+        draftOffsetY = offsetY
+        draftIdleWidth = idleWidthDp
+        draftIdleHeight = idleHeightDp
+        draftCornerRadius = cornerRadiusDp
+        draftAnimationSpeed = animationSpeed
+        IslandEventBus.setLiveDraggingSettings(true)
+        IslandEventBus.updateLiveSettingsPreview(
+            settings.copy(
+                offsetX = offsetX,
+                offsetY = offsetY,
+                idleWidthDp = idleWidthDp,
+                idleHeightDp = idleHeightDp,
+                cornerRadiusDp = cornerRadiusDp,
+                animationSpeed = animationSpeed
+            )
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -166,6 +208,7 @@ fun SettingsScreen(
                 settings = previewSettings,
                 previewEvent = previewEvent,
                 previewMode = previewMode,
+                isLiveDragging = isLiveDragging,
                 onTapPreview = {
                     if (previewEvent == null) {
                         previewEvent = IslandEvent.ChargingStarted(84)
@@ -266,7 +309,7 @@ fun SettingsScreen(
                         hasAccessibilityAccess = hasAccessibilityAccess,
                         hasUsageStatsAccess = hasUsageStatsAccess,
                         onAppExitAnimationToggle = onAppExitAnimationToggle,
-                        onAnimationSpeedDraftChange = { draftAnimationSpeed = it },
+                        onAnimationSpeedDraftChange = { streamLiveDraft(animationSpeed = it) },
                         onAnimationSpeedCommit = { onAnimationSpeedChange(draftAnimationSpeed) },
                         onRequestAccessibilityAccess = onRequestAccessibilityAccess,
                         onRequestUsageAccess = onRequestUsageAccess,
@@ -277,13 +320,39 @@ fun SettingsScreen(
                 item {
                     PositionAndSizeCard(
                         settings = previewSettings,
-                        onOffsetXDraftChange = { draftOffsetX = it },
-                        onOffsetYDraftChange = { draftOffsetY = it },
-                        onWidthDraftChange = { draftIdleWidth = it },
-                        onHeightDraftChange = { draftIdleHeight = it },
-                        onCornerDraftChange = { draftCornerRadius = it },
+                        cutoutMetrics = cutoutMetrics,
+                        onOffsetXDraftChange = { streamLiveDraft(offsetX = it) },
+                        onOffsetYDraftChange = { streamLiveDraft(offsetY = it) },
+                        onWidthDraftChange = { streamLiveDraft(idleWidthDp = it) },
+                        onHeightDraftChange = { streamLiveDraft(idleHeightDp = it) },
+                        onCornerDraftChange = { streamLiveDraft(cornerRadiusDp = it) },
                         onPositionSizeCommit = { x, y, w, h, r ->
-                            onPositionSizeChange(x, y, w, h, r)
+                            onPositionSizeChange(
+                                if (x != null) draftOffsetX else null,
+                                if (y != null) draftOffsetY else null,
+                                if (w != null) draftIdleWidth else null,
+                                if (h != null) draftIdleHeight else null,
+                                if (r != null) draftCornerRadius else null
+                            )
+                        },
+                        onAlignToCamera = {
+                            if (cutoutMetrics.hasCutout && cutoutMetrics.screenWidthDp > 0f) {
+                                val cutoutCenterX = (cutoutMetrics.cutoutLeftDp + cutoutMetrics.cutoutRightDp) / 2f
+                                val screenCenterX = cutoutMetrics.screenWidthDp / 2f
+                                val targetX = (cutoutCenterX - screenCenterX).coerceIn(-180f, 180f)
+                                val targetY = (cutoutMetrics.cutoutTopDp - 3f).coerceIn(0f, 96f)
+                                val cutoutW = cutoutMetrics.cutoutRightDp - cutoutMetrics.cutoutLeftDp
+                                val cutoutH = cutoutMetrics.cutoutBottomDp - cutoutMetrics.cutoutTopDp
+                                val targetW = maxOf(cutoutW + 64f, 120f).coerceIn(84f, 220f)
+                                val targetH = maxOf(cutoutH + 8f, 34f).coerceIn(24f, 54f)
+                                streamLiveDraft(
+                                    offsetX = targetX,
+                                    offsetY = targetY,
+                                    idleWidthDp = targetW,
+                                    idleHeightDp = targetH
+                                )
+                                onPositionSizeChange(targetX, targetY, targetW, targetH, null)
+                            }
                         },
                         onResetToDefault = onResetToDefault
                     )
@@ -336,6 +405,7 @@ private fun LiveIslandPreviewCard(
     settings: IslandSettings,
     previewEvent: IslandEvent?,
     previewMode: IslandDisplayMode,
+    isLiveDragging: Boolean = false,
     onTapPreview: () -> Unit,
     onLongPressPreview: () -> Unit,
     onCollapsePreview: () -> Unit
@@ -378,6 +448,7 @@ private fun LiveIslandPreviewCard(
                         displayMode = previewMode
                     ),
                     settings = settings,
+                    isLiveDragging = isLiveDragging,
                     onTap = onTapPreview,
                     onLongPress = onLongPressPreview,
                     onSwipeUp = onCollapsePreview,
@@ -500,8 +571,7 @@ private fun PermissionsSection(
 
             HorizontalDivider()
 
-            // 3. App Exit Detection (Accessibility or Usage Access)
-            val exitReady = hasAccessibilityAccess || hasUsageStatsAccess
+            // 3. Status-bar Layering & App Exit Detection (Accessibility or Usage Access)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -509,15 +579,15 @@ private fun PermissionsSection(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(exitReady)
+                        StatusDot(hasAccessibilityAccess)
                         Spacer(Modifier.width(8.dp))
-                        Text("App-exit detection", fontWeight = FontWeight.Medium)
+                        Text("Above status bar & app-exit", fontWeight = FontWeight.Medium)
                     }
                     Text(
                         text = when {
-                            hasAccessibilityAccess -> "Accessibility active · Instant window change detection"
-                            hasUsageStatsAccess -> "Usage Access fallback active (enable Accessibility for instant morph)"
-                            else -> "Enable Island Accessibility (or Usage Access) to detect when you leave Spotify or YouTube Music"
+                            hasAccessibilityAccess -> "Accessibility active · Draws above status bar icons & receives top taps cleanly"
+                            hasUsageStatsAccess -> "Usage Access active (enable Accessibility so Island draws above status bar notifications & accepts top taps)"
+                            else -> "Recommended: lets Island draw above status bar notifications, accept top-of-screen taps, and detect app exits"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -632,12 +702,14 @@ private fun AppExitAnimationCard(
 @Composable
 private fun PositionAndSizeCard(
     settings: IslandSettings,
+    cutoutMetrics: CutoutMetrics,
     onOffsetXDraftChange: (Float) -> Unit,
     onOffsetYDraftChange: (Float) -> Unit,
     onWidthDraftChange: (Float) -> Unit,
     onHeightDraftChange: (Float) -> Unit,
     onCornerDraftChange: (Float) -> Unit,
     onPositionSizeCommit: (Float?, Float?, Float?, Float?, Float?) -> Unit,
+    onAlignToCamera: () -> Unit,
     onResetToDefault: () -> Unit
 ) {
     Surface(
@@ -661,7 +733,26 @@ private fun PositionAndSizeCard(
                     onClick = onResetToDefault,
                     colors = ButtonDefaults.outlinedButtonColors()
                 ) {
-                    Text("Reset to default")
+                    Text("Reset")
+                }
+            }
+
+            if (cutoutMetrics.hasCutout && cutoutMetrics.screenWidthDp > 0f) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Camera cutout detected (${(cutoutMetrics.cutoutRightDp - cutoutMetrics.cutoutLeftDp).roundToInt()}×${(cutoutMetrics.cutoutBottomDp - cutoutMetrics.cutoutTopDp).roundToInt()} dp)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(onClick = onAlignToCamera) {
+                        Text("Align to Camera")
+                    }
                 }
             }
 
@@ -678,7 +769,7 @@ private fun PositionAndSizeCard(
                 label = "Horizontal position (X)",
                 valueText = "${settings.offsetX.roundToInt()} dp",
                 value = settings.offsetX,
-                range = -120f..120f,
+                range = -180f..180f,
                 onValueChange = onOffsetXDraftChange,
                 onValueChangeFinished = { onPositionSizeCommit(settings.offsetX, null, null, null, null) }
             )

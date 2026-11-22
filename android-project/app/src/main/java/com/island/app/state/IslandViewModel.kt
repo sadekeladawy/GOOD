@@ -31,6 +31,7 @@ class IslandViewModel(application: Application) : AndroidViewModel(application) 
     val mediaState: StateFlow<IslandEvent.MusicPlayback?> = MediaListenerService.mediaState
     val isMediaListenerConnected: StateFlow<Boolean> = MediaListenerService.isListenerConnected
     val isAccessibilityConnected: StateFlow<Boolean> = AppForegroundTracker.isAccessibilityConnected
+    val cutoutMetrics: StateFlow<com.island.app.service.CutoutMetrics> = IslandEventBus.cutoutMetrics
 
     fun setMasterEnabled(enabled: Boolean) {
         viewModelScope.launch { repo.setMasterEnabled(enabled) }
@@ -53,7 +54,14 @@ class IslandViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setAnimationSpeed(speed: Float) {
-        viewModelScope.launch { repo.setAnimationSpeed(speed) }
+        viewModelScope.launch {
+            try {
+                repo.setAnimationSpeed(speed)
+            } finally {
+                IslandEventBus.setLiveDraggingSettings(false)
+                IslandEventBus.updateLiveSettingsPreview(null)
+            }
+        }
     }
 
     fun setDisplayDuration(option: DisplayDurationOption) {
@@ -68,7 +76,12 @@ class IslandViewModel(application: Application) : AndroidViewModel(application) 
         cornerRadiusDp: Float? = null
     ) {
         viewModelScope.launch {
-            repo.setPositionAndSize(offsetX, offsetY, idleWidthDp, idleHeightDp, cornerRadiusDp)
+            try {
+                repo.setPositionAndSize(offsetX, offsetY, idleWidthDp, idleHeightDp, cornerRadiusDp)
+            } finally {
+                IslandEventBus.setLiveDraggingSettings(false)
+                IslandEventBus.updateLiveSettingsPreview(null)
+            }
         }
     }
 
@@ -77,7 +90,14 @@ class IslandViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun resetToDefault() {
-        viewModelScope.launch { repo.resetToDefault() }
+        viewModelScope.launch {
+            try {
+                repo.resetToDefault()
+            } finally {
+                IslandEventBus.setLiveDraggingSettings(false)
+                IslandEventBus.updateLiveSettingsPreview(null)
+            }
+        }
     }
 
     fun triggerTestEvent(event: IslandEvent) {

@@ -106,7 +106,7 @@ class SettingsRepository(private val context: Context) {
         cornerRadiusDp: Float? = null
     ) {
         context.islandDataStore.edit { prefs ->
-            offsetX?.let { prefs[Keys.OFFSET_X] = it.coerceIn(-120f, 120f) }
+            offsetX?.let { prefs[Keys.OFFSET_X] = it.coerceIn(-180f, 180f) }
             offsetY?.let { prefs[Keys.OFFSET_Y] = it.coerceIn(0f, 96f) }
             idleWidthDp?.let { prefs[Keys.IDLE_WIDTH] = it.coerceIn(84f, 220f) }
             idleHeightDp?.let { prefs[Keys.IDLE_HEIGHT] = it.coerceIn(24f, 54f) }

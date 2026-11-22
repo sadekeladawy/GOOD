@@ -1,8 +1,10 @@
 package com.island.app.service
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
@@ -27,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MediaListenerService : NotificationListenerService() {
 
@@ -34,6 +37,7 @@ class MediaListenerService : NotificationListenerService() {
     private var mediaSessionManager: MediaSessionManager? = null
     private var activeController: MediaController? = null
     private var mediaCommandJob: Job? = null
+    private var artLoadJob: Job? = null
     private var cachedArtSourceKey: String? = null
     private var cachedArtBitmap: Bitmap? = null
     private var cachedDominantColor: Int = IslandEvent.MusicPlayback.DEFAULT_MEDIA_COLOR
@@ -114,6 +118,7 @@ class MediaListenerService : NotificationListenerService() {
         Log.d(TAG, "onListenerDisconnected: clearing controller and requesting rebind")
         _isListenerConnected.value = false
         mediaCommandJob?.cancel()
+        artLoadJob?.cancel()
         runCatching { mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionsChangedListener) }
         bindController(null)
         requestRebindIfNeeded(applicationContext)
@@ -146,6 +151,7 @@ class MediaListenerService : NotificationListenerService() {
         Log.d(TAG, "onDestroy: MediaListenerService tearing down")
         _isListenerConnected.value = false
         mediaCommandJob?.cancel()
+        artLoadJob?.cancel()
         runCatching { mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionsChangedListener) }
         runCatching { activeController?.unregisterCallback(controllerCallback) }
         activeController = null
@@ -208,6 +214,7 @@ class MediaListenerService : NotificationListenerService() {
         runCatching { activeController?.unregisterCallback(controllerCallback) }
         activeController = controller
         cachedArtSourceKey = null
+        cachedArtBitmap = null
         if (controller != null) {
             Log.d(TAG, "bindController: registering callback for ${controller.packageName}")
             runCatching { controller.registerCallback(controllerCallback) }
@@ -218,6 +225,9 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     private fun handleMediaCommand(command: MediaCommand) {
+        if (activeController == null) {
+            refreshActiveSessions()
+        }
         val controller = activeController
         if (controller == null) {
             Log.d(TAG, "handleMediaCommand($command) ignored: no active controller")
@@ -228,7 +238,9 @@ class MediaListenerService : NotificationListenerService() {
             val controls = controller.transportControls
             when (command) {
                 MediaCommand.PlayPause -> {
-                    val playing = controller.playbackState?.state == PlaybackState.STATE_PLAYING
+                    val state = controller.playbackState?.state
+                    val playing = state == PlaybackState.STATE_PLAYING ||
+                        state == PlaybackState.STATE_BUFFERING
                     if (playing) controls.pause() else controls.play()
                 }
                 MediaCommand.Next -> controls.skipToNext()
@@ -246,8 +258,10 @@ class MediaListenerService : NotificationListenerService() {
                         )
                         lastPublishedFingerprint = buildFingerprint(updated)
                         _mediaState.value = updated
-                        IslandEventBus.emitEvent(updated)
                     }
+                }
+                MediaCommand.OpenApp -> {
+                    openMediaControllerApp(controller)
                 }
             }
         }.onFailure { err ->
@@ -255,13 +269,36 @@ class MediaListenerService : NotificationListenerService() {
         }
     }
 
+    private fun openMediaControllerApp(controller: MediaController) {
+        val launchedSession = runCatching {
+            val pi: PendingIntent? = controller.sessionActivity
+            if (pi != null) {
+                pi.send()
+                true
+            } else {
+                false
+            }
+        }.getOrDefault(false)
+        if (launchedSession) return
+
+        val pkg = runCatching { controller.packageName }.getOrNull() ?: return
+        runCatching {
+            val launch = packageManager.getLaunchIntentForPackage(pkg)?.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (launch != null) {
+                startActivity(launch)
+            }
+        }
+    }
+
     private fun publishCurrentMedia() {
         val controller = activeController
         if (controller == null) {
+            artLoadJob?.cancel()
             if (_mediaState.value != null || lastPublishedFingerprint != null) {
                 lastPublishedFingerprint = null
                 _mediaState.value = null
-                IslandEventBus.emitEvent(IslandEvent.MusicSessionEnded())
             }
             return
         }
@@ -288,38 +325,9 @@ class MediaListenerService : NotificationListenerService() {
             ?: "Unknown Artist"
 
         val artKey = "$pkg|$title|$artist"
-        val resolvedArt: Bitmap?
-        val dominantColor: Int
-
-        val metadataRawArt = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
-            ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
-
-        if (metadataRawArt != null && !metadataRawArt.isRecycled) {
-            resolvedArt = safeDownscaleBitmap(metadataRawArt)
-            dominantColor = extractDominantColor(resolvedArt)
-            cachedArtSourceKey = artKey
-            cachedArtBitmap = resolvedArt
-            cachedDominantColor = dominantColor
-            Log.d(TAG, "Album art loaded from MediaMetadata for $pkg ($title)")
-        } else if (cachedArtSourceKey == artKey && cachedArtBitmap != null && cachedArtBitmap?.isRecycled == false) {
-            resolvedArt = cachedArtBitmap
-            dominantColor = cachedDominantColor
-        } else {
-            val notifBitmap = resolveNotificationLargeIcon(pkg)
-            resolvedArt = safeDownscaleBitmap(notifBitmap)
-            dominantColor = extractDominantColor(resolvedArt)
-            cachedArtSourceKey = artKey
-            cachedArtBitmap = resolvedArt
-            cachedDominantColor = dominantColor
-            Log.d(
-                TAG,
-                if (resolvedArt != null) {
-                    "Album art loaded from notification largeIcon fallback for $pkg"
-                } else {
-                    "No album art available for $pkg"
-                }
-            )
-        }
+        val hasCachedArt = cachedArtSourceKey == artKey &&
+            cachedArtBitmap != null &&
+            cachedArtBitmap?.isRecycled == false
 
         val duration = (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(1L)
         val rawPosition = (state?.position ?: 0L).coerceIn(0L, duration)
@@ -328,11 +336,14 @@ class MediaListenerService : NotificationListenerService() {
             ?: SystemClock.elapsedRealtime()
         val playbackSpeed = state?.playbackSpeed?.takeIf { it > 0f } ?: 1f
 
+        val immediateArt = if (hasCachedArt) cachedArtBitmap else null
+        val immediateColor = if (hasCachedArt) cachedDominantColor else IslandEvent.MusicPlayback.DEFAULT_MEDIA_COLOR
+
         val playback = IslandEvent.MusicPlayback(
             title = title,
             artist = artist,
-            albumArt = resolvedArt,
-            dominantColorArgb = dominantColor,
+            albumArt = immediateArt,
+            dominantColorArgb = immediateColor,
             isPlaying = isPlaying,
             positionMs = rawPosition,
             durationMs = duration,
@@ -342,12 +353,38 @@ class MediaListenerService : NotificationListenerService() {
         )
 
         val fingerprint = buildFingerprint(playback)
-        if (fingerprint == lastPublishedFingerprint && _mediaState.value != null) {
-            return
+        if (fingerprint != lastPublishedFingerprint || _mediaState.value == null) {
+            lastPublishedFingerprint = fingerprint
+            _mediaState.value = playback
         }
-        lastPublishedFingerprint = fingerprint
-        _mediaState.value = playback
-        IslandEventBus.emitEvent(playback)
+
+        if (!hasCachedArt) {
+            val rawSource = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                ?: resolveNotificationLargeIcon(pkg)
+            artLoadJob?.cancel()
+            artLoadJob = scope.launch {
+                val (scaled, color) = withContext(Dispatchers.Default) {
+                    val bmp = safeDownscaleBitmap(rawSource)
+                    val dominant = extractDominantColor(bmp)
+                    bmp to dominant
+                }
+                cachedArtSourceKey = artKey
+                cachedArtBitmap = scaled
+                cachedDominantColor = color
+                if (scaled != null && activeController?.sessionToken == controller.sessionToken) {
+                    val current = _mediaState.value
+                    if (current != null && "${current.packageName}|${current.title}|${current.artist}" == artKey) {
+                        val enriched = current.copy(
+                            albumArt = scaled,
+                            dominantColorArgb = color
+                        )
+                        lastPublishedFingerprint = buildFingerprint(enriched)
+                        _mediaState.value = enriched
+                    }
+                }
+            }
+        }
     }
 
     private fun buildFingerprint(playback: IslandEvent.MusicPlayback): String {

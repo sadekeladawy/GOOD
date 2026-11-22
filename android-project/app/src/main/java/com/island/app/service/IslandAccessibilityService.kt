@@ -45,14 +45,18 @@ object AppForegroundTracker {
     private val _isAccessibilityConnected = MutableStateFlow(false)
     val isAccessibilityConnected: StateFlow<Boolean> = _isAccessibilityConnected.asStateFlow()
 
+    private val _activeService = MutableStateFlow<IslandAccessibilityService?>(null)
+    val activeService: StateFlow<IslandAccessibilityService?> = _activeService.asStateFlow()
+
     private val _transitions = MutableSharedFlow<AppTransitionEvent>(extraBufferCapacity = 4)
     val transitions: SharedFlow<AppTransitionEvent> = _transitions.asSharedFlow()
 
     private var lastTransitionAtMs: Long = 0L
 
-    internal fun setAccessibilityConnected(connected: Boolean) {
-        _isAccessibilityConnected.value = connected
-        Log.d(TAG, "AccessibilityService connected=$connected")
+    internal fun setAccessibilityService(service: IslandAccessibilityService?) {
+        _activeService.value = service
+        _isAccessibilityConnected.value = service != null
+        Log.d(TAG, "AccessibilityService connected=${service != null}")
     }
 
     fun onForegroundPackageChanged(rawPackageName: String?) {
@@ -145,7 +149,7 @@ class IslandAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        AppForegroundTracker.setAccessibilityConnected(true)
+        AppForegroundTracker.setAccessibilityService(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -160,9 +164,14 @@ class IslandAccessibilityService : AccessibilityService() {
         // No speech or audio feedback to interrupt
     }
 
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        AppForegroundTracker.setAccessibilityService(null)
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        AppForegroundTracker.setAccessibilityConnected(false)
+        AppForegroundTracker.setAccessibilityService(null)
     }
 }
 

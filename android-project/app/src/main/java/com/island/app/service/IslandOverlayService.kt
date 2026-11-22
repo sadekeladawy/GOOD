@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
@@ -19,9 +20,13 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.app.NotificationCompat
@@ -48,15 +53,20 @@ import com.island.app.model.AppTransitionEvent
 import com.island.app.model.IslandDisplayMode
 import com.island.app.model.IslandEvent
 import com.island.app.state.IslandStateManager
+import com.island.app.state.IslandUiState
 import com.island.app.ui.overlay.AppExitTransitionOverlay
 import com.island.app.ui.overlay.DynamicIslandOverlay
+import com.island.app.ui.overlay.computeIslandLayoutTarget
 import com.island.app.ui.theme.IslandTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -73,7 +83,8 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private var windowManager: WindowManager? = null
+    private var activeWindowManager: WindowManager? = null
+    private var attachedWithAccessibility = false
     private var stateManager: IslandStateManager? = null
     private var systemMonitor: SystemEventMonitor? = null
     private var usageFallback: ForegroundAppUsageFallback? = null
@@ -83,6 +94,7 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     private var fullscreenProbeView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private val settingsState = MutableStateFlow(IslandSettings.Default)
+    private var windowShrinkJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -93,19 +105,11 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         // Always satisfy Android 12+ foreground service startup contract before any early exit
         startForegroundNotification()
 
-        if (!Settings.canDrawOverlays(this)) {
+        if (!canDisplayOverlay(this)) {
             stopForegroundCompat()
             stopSelf()
             return
         }
-
-        val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-        if (wm == null) {
-            stopForegroundCompat()
-            stopSelf()
-            return
-        }
-        windowManager = wm
 
         val settingsRepo = (application as IslandApplication).settingsRepository
         val manager = IslandStateManager(
@@ -132,25 +136,42 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
 
-        val attached = runCatching { attachOverlayViews(wm, manager) }
-            .onFailure { CrashLogger.recordNonFatal(this, "Failed to attach Dynamic Island overlay", it) }
-            .isSuccess
-
-        if (!attached) {
-            stopForegroundCompat()
-            stopSelf()
-            return
+        // Re-attach overlay cleanly when AccessibilityService connects or disconnects so we can
+        // elevate from TYPE_APPLICATION_OVERLAY to TYPE_ACCESSIBILITY_OVERLAY (above status bar).
+        serviceScope.launch {
+            AppForegroundTracker.activeService.collectLatest { a11yService ->
+                if (!canDisplayOverlay(this@IslandOverlayService)) {
+                    stopForegroundCompat()
+                    stopSelf()
+                    return@collectLatest
+                }
+                val attached = attachOrReattachOverlay(manager, a11yService)
+                if (!attached) {
+                    stopForegroundCompat()
+                    stopSelf()
+                }
+            }
         }
 
         runCatching { monitor.start() }
             .onFailure { CrashLogger.recordNonFatal(this, "SystemEventMonitor start error", it) }
 
         serviceScope.launch {
-            settingsRepo.settingsFlow.collectLatest { settings ->
-                settingsState.value = settings
-                manager.onSettingsChanged(settings)
-                updateOverlayPosition(settings)
-                if (settings.masterEnabled && settings.appExitAnimationEnabled) {
+            combine(
+                settingsRepo.settingsFlow,
+                IslandEventBus.liveSettingsPreview
+            ) { persisted, live ->
+                live ?: persisted
+            }.collectLatest { activeSettings ->
+                settingsState.value = activeSettings
+                manager.onSettingsChanged(activeSettings)
+                syncOverlayWindowParams(
+                    uiState = manager.uiState.value,
+                    settings = activeSettings,
+                    cutout = IslandEventBus.cutoutMetrics.value,
+                    isLiveDragging = IslandEventBus.isLiveDraggingSettings.value
+                )
+                if (activeSettings.masterEnabled && activeSettings.appExitAnimationEnabled) {
                     fallback.start()
                 } else {
                     fallback.stop()
@@ -159,12 +180,18 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         }
 
         serviceScope.launch {
-            manager.uiState.collectLatest { uiState ->
-                updateOutsideTouchFlag(
-                    isExpanded = uiState.displayMode == IslandDisplayMode.EXPANDED ||
-                        uiState.displayMode == IslandDisplayMode.FULL_EXPANDED
-                )
-            }
+            combine(
+                manager.uiState,
+                IslandEventBus.cutoutMetrics
+            ) { uiState, cutout -> uiState to cutout }
+                .collectLatest { (uiState, cutout) ->
+                    syncOverlayWindowParams(
+                        uiState = uiState,
+                        settings = settingsState.value,
+                        cutout = cutout,
+                        isLiveDragging = IslandEventBus.isLiveDraggingSettings.value
+                    )
+                }
         }
 
         // Dynamically attach/detach the full-screen spring morph window only while an app transition runs
@@ -174,7 +201,7 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                 .distinctUntilChanged()
                 .collectLatest { transition ->
                     if (transition != null) {
-                        showTransitionOverlay(wm, manager, transition)
+                        showTransitionOverlay(manager, transition)
                     } else {
                         removeTransitionOverlay()
                     }
@@ -211,7 +238,7 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundNotification()
-        if (!Settings.canDrawOverlays(this)) {
+        if (!canDisplayOverlay(this)) {
             stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
@@ -223,10 +250,70 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
 
     override fun onDestroy() {
         super.onDestroy()
+        windowShrinkJob?.cancel()
         runCatching { systemMonitor?.stop() }
         runCatching { usageFallback?.stop() }
         removeTransitionOverlay()
-        val wm = windowManager
+        detachOverlayViews()
+        transitionLifecycleToDestroyed()
+        viewModelStore.clear()
+        serviceScope.cancel()
+    }
+
+    private fun attachOrReattachOverlay(
+        manager: IslandStateManager,
+        a11yService: IslandAccessibilityService?
+    ): Boolean {
+        val wantA11y = a11yService != null
+        if (overlayContainer != null && attachedWithAccessibility == wantA11y) {
+            return true
+        }
+        detachOverlayViews()
+
+        if (a11yService != null) {
+            val a11yWm = a11yService.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            if (a11yWm != null) {
+                val ok = runCatching {
+                    attachOverlayViews(
+                        hostContext = a11yService,
+                        wm = a11yWm,
+                        windowType = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                        manager = manager
+                    )
+                    attachedWithAccessibility = true
+                }.onFailure {
+                    CrashLogger.recordNonFatal(this, "TYPE_ACCESSIBILITY_OVERLAY failed; falling back", it)
+                    detachOverlayViews()
+                }.isSuccess
+                if (ok) return true
+            }
+        }
+
+        if (!Settings.canDrawOverlays(this)) return false
+        val appWm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return false
+        val appType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        return runCatching {
+            attachOverlayViews(
+                hostContext = this,
+                wm = appWm,
+                windowType = appType,
+                manager = manager
+            )
+            attachedWithAccessibility = false
+        }.onFailure {
+            CrashLogger.recordNonFatal(this, "Failed to attach Dynamic Island overlay", it)
+            detachOverlayViews()
+        }.isSuccess
+    }
+
+    private fun detachOverlayViews() {
+        windowShrinkJob?.cancel()
+        val wm = activeWindowManager
         overlayContainer?.let { container ->
             if (container.isAttachedToWindow) {
                 runCatching { wm?.removeViewImmediate(container) }
@@ -239,23 +326,34 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         }
         overlayContainer = null
         fullscreenProbeView = null
-
-        transitionLifecycleToDestroyed()
-        viewModelStore.clear()
-        serviceScope.cancel()
+        overlayParams = null
+        activeWindowManager = null
     }
 
     private fun showTransitionOverlay(
-        wm: WindowManager,
         manager: IslandStateManager,
         transition: AppTransitionEvent
     ) {
         removeTransitionOverlay()
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        val a11yService = AppForegroundTracker.activeService.value
+        val hostContext: Context
+        val wm: WindowManager
+        val type: Int
+        if (a11yService != null) {
+            val a11yWm = a11yService.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            if (a11yWm != null) {
+                hostContext = a11yService
+                wm = a11yWm
+                type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            } else {
+                hostContext = this
+                wm = activeWindowManager ?: (getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return)
+                type = defaultAppOverlayType()
+            }
         } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
+            hostContext = this
+            wm = activeWindowManager ?: (getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return)
+            type = defaultAppOverlayType()
         }
 
         val params = WindowManager.LayoutParams(
@@ -270,13 +368,10 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
+            applyCutoutMode(this)
         }
 
-        val themedContext = ContextThemeWrapper(this, R.style.Theme_Island)
+        val themedContext = ContextThemeWrapper(hostContext, R.style.Theme_Island)
         val container = FrameLayout(themedContext).apply {
             setViewTreeLifecycleOwner(this@IslandOverlayService)
             setViewTreeSavedStateRegistryOwner(this@IslandOverlayService)
@@ -325,7 +420,7 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     }
 
     private fun removeTransitionOverlay() {
-        val wm = windowManager ?: return
+        val wm = activeWindowManager ?: (getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: return
         transitionContainer?.let { container ->
             if (container.isAttachedToWindow) {
                 runCatching { wm.removeViewImmediate(container) }
@@ -401,53 +496,67 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         }
     }
 
-    private fun attachOverlayViews(wm: WindowManager, manager: IslandStateManager) {
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
+    private fun attachOverlayViews(
+        hostContext: Context,
+        wm: WindowManager,
+        windowType: Int,
+        manager: IslandStateManager
+    ) {
+        activeWindowManager = wm
 
-        // Transparent 1px fullscreen detection probe that watches status bar visibility
-        val probe = View(this).apply {
+        // Full-width transparent probe view to read fullscreen status AND exact displayCutout rects
+        val probe = View(hostContext).apply {
             setOnApplyWindowInsetsListener { _, insets ->
                 runCatching {
+                    val compat = WindowInsetsCompat.toWindowInsetsCompat(insets)
                     val statusBarVisible = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         insets.isVisible(WindowInsets.Type.statusBars())
                     } else {
-                        WindowInsetsCompat.toWindowInsetsCompat(insets)
-                            .isVisible(WindowInsetsCompat.Type.statusBars())
+                        compat.isVisible(WindowInsetsCompat.Type.statusBars())
                     }
                     manager.setFullscreenState(!statusBarVisible)
+
+                    val statusTopPx = compat.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars()).top
+                    publishCutoutMetrics(compat, statusTopPx)
                 }
                 insets
             }
         }
         val probeParams = WindowManager.LayoutParams(
-            1,
             WindowManager.LayoutParams.MATCH_PARENT,
-            type,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             alpha = 0f
+            applyCutoutMode(this)
         }
         runCatching {
             wm.addView(probe, probeParams)
             fullscreenProbeView = probe
             ViewCompat.requestApplyInsets(probe)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val compat = WindowInsetsCompat.toWindowInsetsCompat(wm.maximumWindowMetrics.windowInsets)
+                val statusTopPx = compat.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars()).top
+                publishCutoutMetrics(compat, statusTopPx)
+            }
         }
 
         val initialSettings = settingsState.value
+        val initialCutout = IslandEventBus.cutoutMetrics.value
+        val (initW, initH) = computeWindowBoxPx(manager.uiState.value, initialSettings, initialCutout)
+
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            type,
+            initW,
+            initH,
+            windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
@@ -456,14 +565,10 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = dpToPx(initialSettings.offsetX)
             y = dpToPx(initialSettings.offsetY)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
+            applyCutoutMode(this)
         }
 
-        // Wrap ComposeView inside a themed FrameLayout container (ComposeView itself is final)
-        val themedContext = ContextThemeWrapper(this, R.style.Theme_Island)
+        val themedContext = ContextThemeWrapper(hostContext, R.style.Theme_Island)
         val container = object : FrameLayout(themedContext) {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
                 if (event.action == MotionEvent.ACTION_OUTSIDE) {
@@ -484,26 +589,40 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                 CompositionLocalProvider(LocalLifecycleOwner provides this@IslandOverlayService) {
                     val settings by settingsState.collectAsState()
                     val uiState by manager.uiState.collectAsState()
+                    val cutout by IslandEventBus.cutoutMetrics.collectAsState()
+                    val isLiveDragging by IslandEventBus.isLiveDraggingSettings.collectAsState()
 
                     IslandTheme(darkTheme = true, dynamicColor = false) {
-                        DynamicIslandOverlay(
-                            uiState = uiState,
-                            settings = settings,
-                            onTap = {
-                                runCatching { performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
-                                manager.onIslandTap()
-                            },
-                            onLongPress = {
-                                runCatching { performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
-                                manager.onIslandLongPress()
-                            },
-                            onSwipeUp = {
-                                runCatching { performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
-                                manager.collapse()
-                            },
-                            onMediaCommand = { IslandEventBus.sendMediaCommand(it) },
-                            onCallCommand = { IslandEventBus.sendCallCommand(it) }
-                        )
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.TopCenter
+                        ) {
+                            DynamicIslandOverlay(
+                                uiState = uiState,
+                                settings = settings,
+                                cutoutMetrics = cutout,
+                                isLiveDragging = isLiveDragging,
+                                onTap = {
+                                    runCatching { performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+                                    manager.onIslandTap()
+                                },
+                                onLongPress = {
+                                    runCatching { performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
+                                    manager.onIslandLongPress()
+                                },
+                                onSwipeUp = {
+                                    runCatching { performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+                                    manager.collapse()
+                                },
+                                onMediaCommand = { command ->
+                                    if (command == MediaCommand.OpenApp) {
+                                        manager.collapse()
+                                    }
+                                    IslandEventBus.sendMediaCommand(command)
+                                },
+                                onCallCommand = { IslandEventBus.sendCallCommand(it) }
+                            )
+                        }
                     }
                 }
             }
@@ -512,8 +631,8 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         container.addView(
             composeView,
             FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
 
@@ -522,37 +641,148 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         wm.addView(container, params)
     }
 
-    private fun updateOverlayPosition(settings: IslandSettings) {
-        val view = overlayContainer ?: return
-        val params = overlayParams ?: return
-        val wm = windowManager ?: return
-        if (!view.isAttachedToWindow) return
+    private fun publishCutoutMetrics(compat: WindowInsetsCompat, statusTopPx: Int) {
+        val density = resources.displayMetrics.density.coerceAtLeast(1f)
+        val screenWidthDp = resources.displayMetrics.widthPixels / density
+        val cutout = compat.displayCutout
+        val topRect: Rect? = cutout?.boundingRects
+            ?.filter { !it.isEmpty && it.top <= statusTopPx + dpToPx(24f) }
+            ?.minByOrNull { it.top }
 
-        val newX = dpToPx(settings.offsetX)
-        val newY = dpToPx(settings.offsetY)
-        if (params.x != newX || params.y != newY) {
-            params.x = newX
-            params.y = newY
-            runCatching { wm.updateViewLayout(view, params) }
+        val metrics = if (topRect != null) {
+            CutoutMetrics(
+                hasCutout = true,
+                cutoutLeftDp = topRect.left / density,
+                cutoutRightDp = topRect.right / density,
+                cutoutTopDp = topRect.top / density,
+                cutoutBottomDp = topRect.bottom / density,
+                statusBarHeightDp = statusTopPx / density,
+                screenWidthDp = screenWidthDp
+            )
+        } else {
+            CutoutMetrics(
+                hasCutout = false,
+                statusBarHeightDp = statusTopPx / density,
+                screenWidthDp = screenWidthDp
+            )
         }
+        IslandEventBus.updateCutoutMetrics(metrics)
     }
 
-    private fun updateOutsideTouchFlag(isExpanded: Boolean) {
+    private fun computeWindowBoxPx(
+        uiState: IslandUiState,
+        settings: IslandSettings,
+        cutout: CutoutMetrics
+    ): Pair<Int, Int> {
+        val effectiveMode = if (uiState.activeEvent == null) IslandDisplayMode.IDLE else uiState.displayMode
+        val target = computeIslandLayoutTarget(
+            activeEvent = uiState.activeEvent,
+            mode = effectiveMode,
+            settings = settings,
+            cutout = cutout
+        )
+        val padW = if (effectiveMode == IslandDisplayMode.IDLE) 4f else 28f
+        val padH = if (effectiveMode == IslandDisplayMode.IDLE) 4f else 20f
+        return dpToPx(target.widthDp + padW) to dpToPx(target.heightDp + padH)
+    }
+
+    private fun syncOverlayWindowParams(
+        uiState: IslandUiState,
+        settings: IslandSettings,
+        cutout: CutoutMetrics,
+        isLiveDragging: Boolean
+    ) {
         val view = overlayContainer ?: return
         val params = overlayParams ?: return
-        val wm = windowManager ?: return
+        val wm = activeWindowManager ?: return
         if (!view.isAttachedToWindow) return
 
-        val targetFlags = if (isExpanded) {
-            params.flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+        val isHidden = !settings.masterEnabled ||
+            (settings.hideInFullscreen && uiState.isFullscreenHidden)
+        val effectiveMode = if (uiState.activeEvent == null) IslandDisplayMode.IDLE else uiState.displayMode
+        val isActiveCard = !isHidden && effectiveMode != IslandDisplayMode.IDLE
+
+        var targetFlags = params.flags
+        targetFlags = if (isHidden) {
+            targetFlags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
-            params.flags and WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH.inv()
+            targetFlags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         }
+        targetFlags = if (isActiveCard) {
+            targetFlags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+        } else {
+            targetFlags and WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH.inv()
+        }
+
+        val targetX = dpToPx(settings.offsetX)
+        val targetY = dpToPx(settings.offsetY)
+        val (targetW, targetH) = computeWindowBoxPx(uiState, settings, cutout)
+
+        var layoutChanged = false
         if (params.flags != targetFlags) {
             params.flags = targetFlags
+            layoutChanged = true
+        }
+        if (params.x != targetX || params.y != targetY) {
+            params.x = targetX
+            params.y = targetY
+            layoutChanged = true
+        }
+
+        val needsGrow = targetW > params.width || targetH > params.height
+        val needsShrink = targetW < params.width || targetH < params.height
+
+        if (needsGrow || (isLiveDragging && (targetW != params.width || targetH != params.height))) {
+            windowShrinkJob?.cancel()
+            params.width = targetW
+            params.height = targetH
+            layoutChanged = true
+        } else if (needsShrink) {
+            // Keep the larger surface while spring shrinks the Compose pill inside (zero relayout jank!),
+            // then tighten WindowManager bounds once settled so touches pass through outside the pill.
+            windowShrinkJob?.cancel()
+            windowShrinkJob = serviceScope.launch {
+                val settleDelayMs = (420f / settings.animationSpeed.coerceIn(0.5f, 2.0f)).toLong().coerceIn(220L, 850L)
+                delay(settleDelayMs)
+                val v = overlayContainer ?: return@launch
+                val p = overlayParams ?: return@launch
+                val w = activeWindowManager ?: return@launch
+                if (!v.isAttachedToWindow) return@launch
+                val (latestW, latestH) = computeWindowBoxPx(
+                    stateManager?.uiState?.value ?: uiState,
+                    settingsState.value,
+                    IslandEventBus.cutoutMetrics.value
+                )
+                if (p.width != latestW || p.height != latestH) {
+                    p.width = latestW
+                    p.height = latestH
+                    runCatching { w.updateViewLayout(v, p) }
+                }
+            }
+        }
+
+        if (layoutChanged) {
             runCatching { wm.updateViewLayout(view, params) }
         }
     }
+
+    private fun applyCutoutMode(params: WindowManager.LayoutParams) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            params.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            params.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+    }
+
+    private fun defaultAppOverlayType(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
 
     private fun dpToPx(dp: Float): Int {
         return TypedValue.applyDimension(
@@ -565,8 +795,11 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     companion object {
         private const val NOTIFICATION_ID = 1001
 
+        fun canDisplayOverlay(context: Context): Boolean =
+            Settings.canDrawOverlays(context) || AppForegroundTracker.activeService.value != null
+
         fun start(context: Context) {
-            if (!Settings.canDrawOverlays(context)) return
+            if (!canDisplayOverlay(context)) return
             val intent = Intent(context, IslandOverlayService::class.java)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
