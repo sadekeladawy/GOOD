@@ -15,23 +15,24 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.island.app.data.CrashLogger
-import com.island.app.data.IslandSettings
-import com.island.app.service.IslandEventBus
-import com.island.app.service.IslandNotificationListenerService
+import com.island.app.service.AppForegroundTracker
 import com.island.app.service.IslandOverlayService
+import com.island.app.service.MediaListenerService
+import com.island.app.state.IslandViewModel
 import com.island.app.ui.screens.SettingsScreen
 import com.island.app.ui.theme.IslandTheme
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private var hasOverlayPermission by mutableStateOf(false)
     private var hasNotificationAccess by mutableStateOf(false)
+    private var hasAccessibilityAccess by mutableStateOf(false)
+    private var hasUsageStatsAccess by mutableStateOf(false)
     private var lastCrashLog by mutableStateOf<String?>(null)
     private var permissionsRequestedOnce = false
 
@@ -53,13 +54,13 @@ class MainActivity : ComponentActivity() {
             requestMissingRuntimePermissions()
         }
 
-        val repo = (application as IslandApplication).settingsRepository
+        val viewModel = ViewModelProvider(this)[IslandViewModel::class.java]
 
         setContent {
-            val settings by repo.settingsFlow.collectAsStateWithLifecycle(
-                initialValue = IslandSettings.Default
-            )
-            val scope = rememberCoroutineScope()
+            val settings by viewModel.settings.collectAsStateWithLifecycle()
+            val isMediaListenerConnected by viewModel.isMediaListenerConnected.collectAsStateWithLifecycle()
+            val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsStateWithLifecycle()
+            val activeMedia by viewModel.mediaState.collectAsStateWithLifecycle()
 
             LaunchedEffect(settings.masterEnabled, hasOverlayPermission) {
                 if (settings.masterEnabled && hasOverlayPermission) {
@@ -69,11 +70,22 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // If Notification Access is granted in Settings but the listener disconnected, request rebind
+            LaunchedEffect(hasNotificationAccess, isMediaListenerConnected) {
+                if (hasNotificationAccess && !isMediaListenerConnected) {
+                    MediaListenerService.requestRebindIfNeeded(this@MainActivity)
+                }
+            }
+
             IslandTheme {
                 SettingsScreen(
                     settings = settings,
                     hasOverlayPermission = hasOverlayPermission,
                     hasNotificationAccess = hasNotificationAccess,
+                    isMediaListenerConnected = isMediaListenerConnected,
+                    hasAccessibilityAccess = hasAccessibilityAccess || isAccessibilityConnected,
+                    hasUsageStatsAccess = hasUsageStatsAccess,
+                    activeMediaTitle = activeMedia?.let { "${it.title} — ${it.artist}" },
                     lastCrashLog = lastCrashLog,
                     onClearCrashLog = {
                         CrashLogger.clearLastCrash(this@MainActivity)
@@ -81,30 +93,26 @@ class MainActivity : ComponentActivity() {
                     },
                     onRequestOverlayPermission = { openOverlaySettings() },
                     onRequestNotificationAccess = { openNotificationListenerSettings() },
-                    onMasterToggle = { enabled ->
-                        scope.launch { repo.setMasterEnabled(enabled) }
+                    onReconnectMediaListener = {
+                        MediaListenerService.requestRebindIfNeeded(this@MainActivity)
                     },
-                    onAutoStartToggle = { enabled ->
-                        scope.launch { repo.setAutoStartOnBoot(enabled) }
-                    },
-                    onHideFullscreenToggle = { enabled ->
-                        scope.launch { repo.setHideInFullscreen(enabled) }
-                    },
-                    onDurationChange = { option ->
-                        scope.launch { repo.setDisplayDuration(option) }
-                    },
+                    onRequestAccessibilityAccess = { openAccessibilitySettings() },
+                    onRequestUsageAccess = { openUsageAccessSettings() },
+                    onMasterToggle = { viewModel.setMasterEnabled(it) },
+                    onAutoStartToggle = { viewModel.setAutoStartOnBoot(it) },
+                    onHideFullscreenToggle = { viewModel.setHideInFullscreen(it) },
+                    onAppExitAnimationToggle = { viewModel.setAppExitAnimationEnabled(it) },
+                    onAnimationSpeedChange = { viewModel.setAnimationSpeed(it) },
+                    onDurationChange = { viewModel.setDisplayDuration(it) },
                     onPositionSizeChange = { x, y, w, h, r ->
-                        scope.launch { repo.setPositionAndSize(x, y, w, h, r) }
+                        viewModel.setPositionAndSize(x, y, w, h, r)
                     },
                     onEventToggle = { type, enabled ->
-                        scope.launch { repo.setEventEnabled(type, enabled) }
+                        viewModel.setEventEnabled(type, enabled)
                     },
-                    onResetToDefault = {
-                        scope.launch { repo.resetToDefault() }
-                    },
-                    onTriggerTestEvent = { event ->
-                        IslandEventBus.emitEvent(event)
-                    }
+                    onResetToDefault = { viewModel.resetToDefault() },
+                    onTriggerTestEvent = { viewModel.triggerTestEvent(it) },
+                    onTestAppExitAnimation = { viewModel.triggerTestAppExitAnimation() }
                 )
             }
         }
@@ -119,10 +127,16 @@ class MainActivity : ComponentActivity() {
     private fun refreshPermissionsAndService() {
         hasOverlayPermission = runCatching { Settings.canDrawOverlays(this) }.getOrDefault(false)
         hasNotificationAccess = runCatching { isNotificationListenerEnabled() }.getOrDefault(false)
+        hasAccessibilityAccess = AppForegroundTracker.isAccessibilityEnabledInSettings(this)
+        hasUsageStatsAccess = AppForegroundTracker.hasUsageStatsPermission(this)
+
+        if (hasNotificationAccess && !MediaListenerService.isListenerConnected.value) {
+            MediaListenerService.requestRebindIfNeeded(this)
+        }
     }
 
     private fun isNotificationListenerEnabled(): Boolean {
-        val cn = ComponentName(this, IslandNotificationListenerService::class.java)
+        val cn = ComponentName(this, MediaListenerService::class.java)
         val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
         return flat.split(":").any { ComponentName.unflattenFromString(it) == cn }
     }
@@ -140,6 +154,22 @@ class MainActivity : ComponentActivity() {
     private fun openNotificationListenerSettings() {
         runCatching {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        runCatching {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
+    }
+
+    private fun openUsageAccessSettings() {
+        runCatching {
+            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
         }.onFailure {
             runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
         }

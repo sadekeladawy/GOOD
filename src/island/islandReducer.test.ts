@@ -6,10 +6,14 @@ import {
   collapseIsland,
   createInitialIslandState,
   enqueueIslandEvent,
+  finishAppTransition,
   getIslandDimensions,
   longPressIsland,
+  onExitAnimationReachedIsland,
   resetPositionAndSize,
   resolveIncomingCall,
+  seekMusic,
+  startAppTransition,
   tapIsland,
   toggleMusicPlayPause,
 } from './islandReducer';
@@ -112,13 +116,20 @@ test('incoming call preempts active events and resolves cleanly', () => {
   assert.equal(state.callStatusMessage, 'Connected with Elena Vance');
 });
 
-test('settings clamping, resetToDefault, music toggle, and dimensions behave deterministically', () => {
+test('settings clamping, resetToDefault, music toggle, seekMusic, and dimensions behave deterministically', () => {
   const base = createDefaultSettings();
-  const modified = clampSettings({ offsetX: 999, offsetY: -10, idleWidth: 500, cornerRadius: 5 }, base);
+  const modified = clampSettings(
+    { offsetX: 999, offsetY: -10, idleWidth: 500, cornerRadius: 5, animationSpeed: 4.5 },
+    base
+  );
   assert.equal(modified.offsetX, 80);
   assert.equal(modified.offsetY, 4);
   assert.equal(modified.idleWidth, 200);
   assert.equal(modified.cornerRadius, 10);
+  assert.equal(modified.animationSpeed, 2.0);
+
+  const slow = clampSettings({ animationSpeed: 0.1 }, base);
+  assert.equal(slow.animationSpeed, 0.5);
 
   const reset = resetPositionAndSize(modified);
   assert.equal(reset.offsetX, base.offsetX);
@@ -138,6 +149,51 @@ test('settings clamping, resetToDefault, music toggle, and dimensions behave det
     },
     base
   );
+  state = seekMusic(state, 125);
+  assert.equal(state.persistentMusic?.positionSec, 125);
+  assert.equal(state.activeEvent?.type === 'MUSIC_PLAYER' ? state.activeEvent.track.positionSec : -1, 125);
+
+  state = seekMusic(state, 999);
+  assert.equal(state.persistentMusic?.positionSec, 180);
+
   state = toggleMusicPlayPause(state);
   assert.equal(state.persistentMusic?.isPlaying, false);
+});
+
+test('app exit and reverse enter transitions respect toggle and expand/finish cleanly', () => {
+  const settings = createDefaultSettings();
+  let state = createInitialIslandState();
+
+  state = enqueueIslandEvent(
+    state,
+    {
+      id: 'music_session',
+      type: 'MUSIC_PLAYER',
+      track: { title: 'Midnight Refraction', artist: 'Kiasmos', isPlaying: true, positionSec: 45, durationSec: 214 },
+    },
+    settings
+  );
+
+  // Disabled toggle prevents transition
+  const disabled = startAppTransition(state, 'EXIT_TO_ISLAND', { ...settings, appExitAnimationEnabled: false }, 'tx-0');
+  assert.equal(disabled.activeTransition, null);
+
+  // Exit transition starts and expands when reaching island
+  state = startAppTransition(state, 'EXIT_TO_ISLAND', settings, 'tx-1', '#2E1065');
+  assert.equal(state.activeTransition?.direction, 'EXIT_TO_ISLAND');
+
+  state = onExitAnimationReachedIsland(state);
+  assert.equal(state.displayMode, 'EXPANDED');
+  assert.equal(state.activeEvent?.type, 'MUSIC_PLAYER');
+
+  state = finishAppTransition(state, 'tx-1');
+  assert.equal(state.activeTransition, null);
+
+  // Reverse enter collapses to compact while card grows out of island
+  state = startAppTransition(state, 'ENTER_FROM_ISLAND', settings, 'tx-2', '#2E1065');
+  assert.equal(state.displayMode, 'COMPACT');
+  assert.equal(state.activeTransition?.direction, 'ENTER_FROM_ISLAND');
+
+  state = finishAppTransition(state, 'tx-2');
+  assert.equal(state.activeTransition, null);
 });

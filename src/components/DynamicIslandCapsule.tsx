@@ -36,6 +36,7 @@ interface DynamicIslandCapsuleProps {
   onLongPress: () => void;
   onSwipeUp: () => void;
   onMediaAction: (action: 'PLAY_PAUSE' | 'NEXT' | 'PREV') => void;
+  onMediaSeek?: (positionSec: number) => void;
   onCallAction: (action: 'ACCEPT' | 'DECLINE') => void;
   scaleFactor?: number;
 }
@@ -129,6 +130,7 @@ export const DynamicIslandCapsule: React.FC<DynamicIslandCapsuleProps> = ({
   onLongPress,
   onSwipeUp,
   onMediaAction,
+  onMediaSeek,
   onCallAction,
   scaleFactor = 1,
 }) => {
@@ -239,6 +241,7 @@ export const DynamicIslandCapsule: React.FC<DynamicIslandCapsuleProps> = ({
                 event={activeEvent}
                 mode={displayMode}
                 onMediaAction={onMediaAction}
+                onMediaSeek={onMediaSeek}
                 onCallAction={onCallAction}
               />
             )}
@@ -272,11 +275,13 @@ function IslandCardBody({
   event,
   mode,
   onMediaAction,
+  onMediaSeek,
   onCallAction,
 }: {
   event: IslandEvent;
   mode: IslandDisplayMode;
   onMediaAction: (action: 'PLAY_PAUSE' | 'NEXT' | 'PREV') => void;
+  onMediaSeek?: (positionSec: number) => void;
   onCallAction: (action: 'ACCEPT' | 'DECLINE') => void;
 }) {
   const isCompact = mode === 'COMPACT';
@@ -621,7 +626,6 @@ function IslandCardBody({
       );
 
     case 'MUSIC_PLAYER': {
-      const pct = Math.min(100, Math.round((event.track.positionSec / Math.max(1, event.track.durationSec)) * 100));
       return isCompact ? (
         <div className="w-full px-2.5 flex items-center justify-between gap-2">
           <img
@@ -649,16 +653,25 @@ function IslandCardBody({
             <EqualizerBars playing={event.track.isPlaying} />
           </div>
 
-          <div className="space-y-1">
-            <div className="w-full h-1 rounded-full bg-white/20 overflow-hidden">
-              <div className="h-full bg-white rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
+          <div
+            className="space-y-1"
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="range"
+              aria-label="Seek track position"
+              min={0}
+              max={Math.max(1, event.track.durationSec)}
+              value={Math.min(event.track.durationSec, Math.max(0, event.track.positionSec))}
+              onChange={(e) => onMediaSeek?.(Number(e.target.value))}
+              className="w-full h-1.5 rounded-full bg-white/20 accent-white cursor-pointer"
+            />
+            <div className="flex justify-between text-[10px] font-mono text-zinc-400 tabular-nums">
+              <span>{formatTime(event.track.positionSec)}</span>
+              <span>{formatTime(event.track.durationSec)}</span>
             </div>
-            {isFull && (
-              <div className="flex justify-between text-[10px] font-mono text-zinc-400 tabular-nums">
-                <span>{formatTime(event.track.positionSec)}</span>
-                <span>{formatTime(event.track.durationSec)}</span>
-              </div>
-            )}
           </div>
 
           <div className="flex items-center justify-center gap-6">

@@ -39,6 +39,8 @@ data class IslandSettings(
     val masterEnabled: Boolean = true,
     val autoStartOnBoot: Boolean = true,
     val hideInFullscreen: Boolean = true,
+    val appExitAnimationEnabled: Boolean = true,
+    val animationSpeed: Float = 1.0f,  // 0.5x (slower) .. 2.0x (faster)
     val displayDuration: DisplayDurationOption = DisplayDurationOption.MEDIUM,
     val offsetX: Float = 0f,           // dp: -120..120
     val offsetY: Float = 12f,          // dp: 0..96

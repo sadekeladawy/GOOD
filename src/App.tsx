@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
 import { AndroidCodeExplorer } from './components/AndroidCodeExplorer';
 import { EventTriggerPanel } from './components/EventTriggerPanel';
@@ -11,10 +11,14 @@ import {
   collapseIsland,
   createInitialIslandState,
   enqueueIslandEvent,
+  finishAppTransition,
   isStickyEvent,
   longPressIsland,
+  onExitAnimationReachedIsland,
   resetPositionAndSize,
   resolveIncomingCall,
+  seekMusic,
+  startAppTransition,
   tapIsland,
   toggleMusicPlayPause,
 } from './island/islandReducer';
@@ -66,6 +70,7 @@ export default function App() {
   const [trackIndex, setTrackIndex] = useState(0);
   const [hapticCount, setHapticCount] = useState(0);
   const [downloading, setDownloading] = useState(false);
+  const postExitShrinkTimer = useRef<number | null>(null);
 
   useEffect(() => {
     try {
@@ -237,6 +242,76 @@ export default function App() {
     [settings, trackIndex]
   );
 
+  const handleMediaSeek = useCallback((positionSec: number) => {
+    setIslandState((prev) => seekMusic(prev, positionSec));
+  }, []);
+
+  const handleSimulateAppExit = useCallback(() => {
+    if (postExitShrinkTimer.current) {
+      window.clearTimeout(postExitShrinkTimer.current);
+      postExitShrinkTimer.current = null;
+    }
+    setIslandState((prev) => {
+      const withMusic = prev.persistentMusic
+        ? prev
+        : enqueueIslandEvent(
+            prev,
+            { id: 'music_session', type: 'MUSIC_PLAYER', track: DEMO_TRACKS[trackIndex] },
+            settings
+          );
+      return startAppTransition(
+        withMusic,
+        'EXIT_TO_ISLAND',
+        settings,
+        `exit_${Date.now()}`,
+        '#3B1D7A'
+      );
+    });
+  }, [settings, trackIndex]);
+
+  const handleSimulateAppEnter = useCallback(() => {
+    if (postExitShrinkTimer.current) {
+      window.clearTimeout(postExitShrinkTimer.current);
+      postExitShrinkTimer.current = null;
+    }
+    setIslandState((prev) => {
+      const withMusic = prev.persistentMusic
+        ? prev
+        : enqueueIslandEvent(
+            prev,
+            { id: 'music_session', type: 'MUSIC_PLAYER', track: DEMO_TRACKS[trackIndex] },
+            settings
+          );
+      return startAppTransition(
+        withMusic,
+        'ENTER_FROM_ISLAND',
+        settings,
+        `enter_${Date.now()}`,
+        '#3B1D7A'
+      );
+    });
+  }, [settings, trackIndex]);
+
+  const handleExitReachedIsland = useCallback(() => {
+    triggerHapticTick();
+    setIslandState((prev) => onExitAnimationReachedIsland(prev));
+    if (postExitShrinkTimer.current) {
+      window.clearTimeout(postExitShrinkTimer.current);
+    }
+    postExitShrinkTimer.current = window.setTimeout(() => {
+      setIslandState((prev) =>
+        prev.activeEvent?.type === 'MUSIC_PLAYER' && prev.displayMode === 'EXPANDED'
+          ? { ...prev, displayMode: 'COMPACT' }
+          : prev
+      );
+      postExitShrinkTimer.current = null;
+    }, 2000);
+  }, [triggerHapticTick]);
+
+  const handleTransitionFinished = useCallback((transitionId: string) => {
+    setIslandState((prev) => finishAppTransition(prev, transitionId));
+  }, []);
+
   const handleDownloadZip = async () => {
     setDownloading(true);
     try {
@@ -329,9 +404,14 @@ export default function App() {
                   setIslandState((prev) => ({ ...prev, isFullscreen: !prev.isFullscreen }));
                 }}
                 onMediaAction={handleMediaAction}
+                onMediaSeek={handleMediaSeek}
                 onCallAction={(action) => {
                   setIslandState((prev) => resolveIncomingCall(prev, action));
                 }}
+                onSimulateAppExit={handleSimulateAppExit}
+                onSimulateAppEnter={handleSimulateAppEnter}
+                onExitTransitionReachedIsland={handleExitReachedIsland}
+                onTransitionFinished={handleTransitionFinished}
               />
             </section>
 

@@ -18,6 +18,22 @@ enum class IslandDisplayMode {
     FULL_EXPANDED
 }
 
+enum class AppTransitionDirection {
+    EXIT_TO_ISLAND,
+    ENTER_FROM_ISLAND
+}
+
+@Immutable
+data class AppTransitionEvent(
+    val id: String = UUID.randomUUID().toString(),
+    val direction: AppTransitionDirection,
+    val packageName: String,
+    val dominantColorArgb: Int,
+    val albumArt: Bitmap?,
+    val title: String,
+    val artist: String
+)
+
 @Immutable
 sealed interface IslandEvent {
     val id: String
@@ -137,6 +153,7 @@ sealed interface IslandEvent {
         val title: String,
         val artist: String,
         val albumArt: Bitmap? = null,
+        val dominantColorArgb: Int = DEFAULT_MEDIA_COLOR,
         val isPlaying: Boolean,
         val positionMs: Long = 0L,
         val durationMs: Long = 1L,
@@ -146,5 +163,9 @@ sealed interface IslandEvent {
     ) : IslandEvent {
         override val type = IslandEventType.MUSIC_PLAYER
         override val isSticky: Boolean = isPlaying
+
+        companion object {
+            const val DEFAULT_MEDIA_COLOR: Int = 0xFF1A1D2B.toInt()
+        }
     }
 }

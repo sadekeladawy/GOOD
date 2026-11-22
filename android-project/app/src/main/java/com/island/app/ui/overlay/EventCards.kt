@@ -54,12 +54,16 @@ import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material.icons.rounded.WifiTethering
 import androidx.compose.material.icons.rounded.WifiTetheringOff
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -662,8 +666,15 @@ private fun MusicPlayerCard(
             AnimatedEqualizer(isPlaying = event.isPlaying, color = IslandViolet)
         }
     } else {
-        val rawProgress = event.positionMs.toFloat() / event.durationMs.coerceAtLeast(1L).toFloat()
-        val progress = if (rawProgress.isFinite()) rawProgress.coerceIn(0f, 1f) else 0f
+        val safeDuration = event.durationMs.coerceAtLeast(1L)
+        val rawProgress = event.positionMs.toFloat() / safeDuration.toFloat()
+        val liveProgress = if (rawProgress.isFinite()) rawProgress.coerceIn(0f, 1f) else 0f
+
+        var isScrubbing by remember(event.packageName, event.title) { mutableStateOf(false) }
+        var scrubFraction by remember(event.packageName, event.title) { mutableFloatStateOf(liveProgress) }
+        val displayedProgress = if (isScrubbing) scrubFraction else liveProgress
+        val displayedPositionMs = (displayedProgress * safeDuration).toLong().coerceIn(0L, safeDuration)
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -676,7 +687,7 @@ private fun MusicPlayerCard(
             ) {
                 AlbumArtBox(
                     event = event,
-                    size = if (mode == IslandDisplayMode.FULL_EXPANDED) 56.dp else 46.dp,
+                    size = if (mode == IslandDisplayMode.FULL_EXPANDED) 56.dp else 44.dp,
                     corner = 12.dp
                 )
                 Spacer(Modifier.width(12.dp))
@@ -700,15 +711,45 @@ private fun MusicPlayerCard(
                 AnimatedEqualizer(isPlaying = event.isPlaying, color = IslandViolet)
             }
 
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp)),
-                color = Color.White,
-                trackColor = Color(0x33FFFFFF)
-            )
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Slider(
+                    value = displayedProgress,
+                    onValueChange = { fraction ->
+                        isScrubbing = true
+                        scrubFraction = fraction.coerceIn(0f, 1f)
+                    },
+                    onValueChangeFinished = {
+                        val targetMs = (scrubFraction * safeDuration).toLong().coerceIn(0L, safeDuration)
+                        isScrubbing = false
+                        onMediaCommand(MediaCommand.SeekTo(targetMs))
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(24.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = Color.White,
+                        inactiveTrackColor = Color(0x33FFFFFF)
+                    )
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = formatMediaTime(displayedPositionMs),
+                        color = MutedWhite,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = formatMediaTime(safeDuration),
+                        color = MutedWhite,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -751,6 +792,13 @@ private fun MusicPlayerCard(
             }
         }
     }
+}
+
+private fun formatMediaTime(millis: Long): String {
+    val totalSeconds = (millis / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "%d:%02d".format(minutes, seconds)
 }
 
 @Composable

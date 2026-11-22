@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.island.app.data.DisplayDurationOption
@@ -51,6 +54,7 @@ import com.island.app.model.IslandDisplayMode
 import com.island.app.model.IslandEvent
 import com.island.app.state.IslandUiState
 import com.island.app.ui.overlay.DynamicIslandOverlay
+import java.util.Locale
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -59,18 +63,28 @@ fun SettingsScreen(
     settings: IslandSettings,
     hasOverlayPermission: Boolean,
     hasNotificationAccess: Boolean,
+    isMediaListenerConnected: Boolean,
+    hasAccessibilityAccess: Boolean,
+    hasUsageStatsAccess: Boolean,
+    activeMediaTitle: String? = null,
     lastCrashLog: String? = null,
     onClearCrashLog: () -> Unit = {},
     onRequestOverlayPermission: () -> Unit,
     onRequestNotificationAccess: () -> Unit,
+    onReconnectMediaListener: () -> Unit,
+    onRequestAccessibilityAccess: () -> Unit,
+    onRequestUsageAccess: () -> Unit,
     onMasterToggle: (Boolean) -> Unit,
     onAutoStartToggle: (Boolean) -> Unit,
     onHideFullscreenToggle: (Boolean) -> Unit,
+    onAppExitAnimationToggle: (Boolean) -> Unit,
+    onAnimationSpeedChange: (Float) -> Unit,
     onDurationChange: (DisplayDurationOption) -> Unit,
     onPositionSizeChange: (Float?, Float?, Float?, Float?, Float?) -> Unit,
     onEventToggle: (IslandEventType, Boolean) -> Unit,
     onResetToDefault: () -> Unit,
-    onTriggerTestEvent: (IslandEvent) -> Unit
+    onTriggerTestEvent: (IslandEvent) -> Unit,
+    onTestAppExitAnimation: () -> Unit
 ) {
     var previewEvent by remember { mutableStateOf<IslandEvent?>(null) }
     var previewMode by remember { mutableStateOf(IslandDisplayMode.IDLE) }
@@ -186,15 +200,33 @@ fun SettingsScreen(
                     }
                 }
 
-                if (!hasOverlayPermission || !hasNotificationAccess) {
-                    item {
-                        PermissionsSection(
-                            hasOverlayPermission = hasOverlayPermission,
-                            hasNotificationAccess = hasNotificationAccess,
-                            onRequestOverlayPermission = onRequestOverlayPermission,
-                            onRequestNotificationAccess = onRequestNotificationAccess
-                        )
-                    }
+                item {
+                    PermissionsSection(
+                        hasOverlayPermission = hasOverlayPermission,
+                        hasNotificationAccess = hasNotificationAccess,
+                        isMediaListenerConnected = isMediaListenerConnected,
+                        hasAccessibilityAccess = hasAccessibilityAccess,
+                        hasUsageStatsAccess = hasUsageStatsAccess,
+                        activeMediaTitle = activeMediaTitle,
+                        onRequestOverlayPermission = onRequestOverlayPermission,
+                        onRequestNotificationAccess = onRequestNotificationAccess,
+                        onReconnectMediaListener = onReconnectMediaListener,
+                        onRequestAccessibilityAccess = onRequestAccessibilityAccess,
+                        onRequestUsageAccess = onRequestUsageAccess
+                    )
+                }
+
+                item {
+                    AppExitAnimationCard(
+                        settings = settings,
+                        hasAccessibilityAccess = hasAccessibilityAccess,
+                        hasUsageStatsAccess = hasUsageStatsAccess,
+                        onAppExitAnimationToggle = onAppExitAnimationToggle,
+                        onAnimationSpeedChange = onAnimationSpeedChange,
+                        onRequestAccessibilityAccess = onRequestAccessibilityAccess,
+                        onRequestUsageAccess = onRequestUsageAccess,
+                        onTestAppExitAnimation = onTestAppExitAnimation
+                    )
                 }
 
                 item {
@@ -305,11 +337,28 @@ private fun LiveIslandPreviewCard(
 }
 
 @Composable
+private fun StatusDot(active: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(if (active) Color(0xFF30D158) else Color(0xFFFF9F0A))
+    )
+}
+
+@Composable
 private fun PermissionsSection(
     hasOverlayPermission: Boolean,
     hasNotificationAccess: Boolean,
+    isMediaListenerConnected: Boolean,
+    hasAccessibilityAccess: Boolean,
+    hasUsageStatsAccess: Boolean,
+    activeMediaTitle: String?,
     onRequestOverlayPermission: () -> Unit,
-    onRequestNotificationAccess: () -> Unit
+    onRequestNotificationAccess: () -> Unit,
+    onReconnectMediaListener: () -> Unit,
+    onRequestAccessibilityAccess: () -> Unit,
+    onRequestUsageAccess: () -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -321,45 +370,204 @@ private fun PermissionsSection(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Required Permissions", style = MaterialTheme.typography.titleMedium)
+            Text("Permissions & Media Access", style = MaterialTheme.typography.titleMedium)
 
-            if (!hasOverlayPermission) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
+            // 1. Display over other apps
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StatusDot(hasOverlayPermission)
+                        Spacer(Modifier.width(8.dp))
                         Text("Display over other apps", fontWeight = FontWeight.Medium)
-                        Text(
-                            "Required to float the island above apps",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
+                    Text(
+                        text = if (hasOverlayPermission) "Granted · Floating overlay ready" else "Required to float the island above apps",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (!hasOverlayPermission) {
                     Button(onClick = onRequestOverlayPermission) {
                         Text("Grant")
                     }
                 }
             }
 
-            if (!hasNotificationAccess) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
+            HorizontalDivider()
+
+            // 2. Notification & Media Listener Access
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StatusDot(hasNotificationAccess && isMediaListenerConnected)
+                        Spacer(Modifier.width(8.dp))
                         Text("Notification & Media access", fontWeight = FontWeight.Medium)
-                        Text(
-                            "Required for music player metadata & controls",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
-                    Button(onClick = onRequestNotificationAccess) {
+                    val statusSubtitle = when {
+                        !hasNotificationAccess -> "Required for Spotify, YouTube Music & live seekbar"
+                        !isMediaListenerConnected -> "Enabled in Settings, waiting for Android to bind"
+                        !activeMediaTitle.isNullOrBlank() -> "Connected · $activeMediaTitle"
+                        else -> "Connected · Ready for active media sessions"
+                    }
+                    Text(
+                        text = statusSubtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                when {
+                    !hasNotificationAccess -> {
+                        Button(onClick = onRequestNotificationAccess) {
+                            Text("Enable")
+                        }
+                    }
+                    !isMediaListenerConnected -> {
+                        OutlinedButton(onClick = onReconnectMediaListener) {
+                            Text("Reconnect")
+                        }
+                    }
+                    else -> {
+                        OutlinedButton(onClick = onRequestNotificationAccess) {
+                            Text("Manage")
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider()
+
+            // 3. App Exit Detection (Accessibility or Usage Access)
+            val exitReady = hasAccessibilityAccess || hasUsageStatsAccess
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StatusDot(exitReady)
+                        Spacer(Modifier.width(8.dp))
+                        Text("App-exit detection", fontWeight = FontWeight.Medium)
+                    }
+                    Text(
+                        text = when {
+                            hasAccessibilityAccess -> "Accessibility active · Instant window change detection"
+                            hasUsageStatsAccess -> "Usage Access fallback active (enable Accessibility for instant morph)"
+                            else -> "Enable Island Accessibility (or Usage Access) to detect when you leave Spotify or YouTube Music"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                if (!hasAccessibilityAccess) {
+                    Button(onClick = onRequestAccessibilityAccess) {
                         Text("Enable")
                     }
+                } else {
+                    OutlinedButton(onClick = onRequestAccessibilityAccess) {
+                        Text("Manage")
+                    }
+                }
+            }
+
+            if (!hasAccessibilityAccess && !hasUsageStatsAccess) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    OutlinedButton(onClick = onRequestUsageAccess) {
+                        Text("Use Usage Access fallback instead")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppExitAnimationCard(
+    settings: IslandSettings,
+    hasAccessibilityAccess: Boolean,
+    hasUsageStatsAccess: Boolean,
+    onAppExitAnimationToggle: (Boolean) -> Unit,
+    onAnimationSpeedChange: (Float) -> Unit,
+    onRequestAccessibilityAccess: () -> Unit,
+    onRequestUsageAccess: () -> Unit,
+    onTestAppExitAnimation: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("App exit animation", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "Morphs Spotify / YouTube Music into the island when returning home, and reverses when reopening",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = settings.appExitAnimationEnabled,
+                    onCheckedChange = onAppExitAnimationToggle
+                )
+            }
+
+            SettingSliderRow(
+                label = "Animation speed",
+                valueText = String.format(Locale.US, "%.2fx", settings.animationSpeed),
+                value = settings.animationSpeed,
+                range = 0.5f..2.0f,
+                onValueChange = onAnimationSpeedChange
+            )
+
+            if (settings.appExitAnimationEnabled && !hasAccessibilityAccess && !hasUsageStatsAccess) {
+                Text(
+                    text = "Requires Island Accessibility Service (watches window package switches only; never reads screen text) or Usage Access fallback.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onRequestAccessibilityAccess) {
+                        Text("Accessibility")
+                    }
+                    OutlinedButton(onClick = onRequestUsageAccess) {
+                        Text("Usage Access")
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                OutlinedButton(onClick = onTestAppExitAnimation) {
+                    Text("Test App Exit")
                 }
             }
         }

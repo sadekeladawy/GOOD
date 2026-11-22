@@ -140,25 +140,55 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             checked={settings.hideInFullscreen}
             onChange={(checked) => onUpdateSettings({ hideInFullscreen: checked })}
           />
+          <ToggleRow
+            id="toggle-app-exit"
+            label="App exit animation"
+            description="Morph Spotify / YouTube Music into the island when leaving the app (Accessibility or Usage Access)"
+            checked={settings.appExitAnimationEnabled}
+            onChange={(checked) => onUpdateSettings({ appExitAnimationEnabled: checked })}
+          />
         </div>
 
-        <div className="pt-2">
-          <p className="text-sm font-medium text-[#0F172A] mb-2">Card visible duration</p>
-          <div className="inline-flex p-1 rounded-lg bg-[#F1F5F9] border border-[#E2E8F0]">
-            {durations.map((sec) => (
-              <button
-                key={sec}
-                type="button"
-                onClick={() => onUpdateSettings({ displayDurationSec: sec })}
-                className={`px-4 py-1.5 text-xs font-medium rounded-md transition-colors tabular-nums ${
-                  settings.displayDurationSec === sec
-                    ? 'bg-white text-[#0F172A] shadow-sm'
-                    : 'text-[#64748B] hover:text-[#0F172A]'
-                }`}
-              >
-                {sec}s
-              </button>
-            ))}
+        <div className="pt-2 space-y-4">
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <label htmlFor="slider-animation-speed" className="font-medium text-[#0F172A]">
+                Animation speed
+              </label>
+              <span className="font-mono font-medium text-[#2563EB] tabular-nums">
+                {settings.animationSpeed.toFixed(2)}x
+              </span>
+            </div>
+            <input
+              id="slider-animation-speed"
+              type="range"
+              min={0.5}
+              max={2.0}
+              step={0.05}
+              value={settings.animationSpeed}
+              onChange={(e) => onUpdateSettings({ animationSpeed: Number(e.target.value) })}
+              className="w-full h-1.5 bg-[#E2E8F0] rounded-lg appearance-none cursor-pointer accent-[#2563EB]"
+            />
+          </div>
+
+          <div>
+            <p className="text-sm font-medium text-[#0F172A] mb-2">Card visible duration</p>
+            <div className="inline-flex p-1 rounded-lg bg-[#F1F5F9] border border-[#E2E8F0]">
+              {durations.map((sec) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => onUpdateSettings({ displayDurationSec: sec })}
+                  className={`px-4 py-1.5 text-xs font-medium rounded-md transition-colors tabular-nums ${
+                    settings.displayDurationSec === sec
+                      ? 'bg-white text-[#0F172A] shadow-sm'
+                      : 'text-[#64748B] hover:text-[#0F172A]'
+                  }`}
+                >
+                  {sec}s
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>

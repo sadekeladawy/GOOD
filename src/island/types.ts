@@ -40,10 +40,22 @@ export type IslandEvent =
   | { id: string; type: 'INCOMING_CALL'; callerName: string; phoneNumber: string }
   | { id: string; type: 'MUSIC_PLAYER'; track: MusicTrack };
 
+export type AppTransitionDirection = 'EXIT_TO_ISLAND' | 'ENTER_FROM_ISLAND';
+
+export interface AppTransitionState {
+  id: string;
+  direction: AppTransitionDirection;
+  title: string;
+  artist: string;
+  dominantColor: string;
+}
+
 export interface IslandSettings {
   masterEnabled: boolean;
   autoStartOnBoot: boolean;
   hideInFullscreen: boolean;
+  appExitAnimationEnabled: boolean;
+  animationSpeed: number;
   displayDurationSec: DisplayDurationSeconds;
   offsetX: number;
   offsetY: number;
@@ -60,6 +72,7 @@ export interface IslandState {
   persistentMusic: MusicTrack | null;
   isFullscreen: boolean;
   callStatusMessage: string | null;
+  activeTransition: AppTransitionState | null;
 }
 
 export const EVENT_METADATA: Array<{
@@ -86,6 +99,8 @@ export function createDefaultSettings(): IslandSettings {
     masterEnabled: true,
     autoStartOnBoot: true,
     hideInFullscreen: true,
+    appExitAnimationEnabled: true,
+    animationSpeed: 1.0,
     displayDurationSec: 4,
     offsetX: 0,
     offsetY: 12,

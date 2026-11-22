@@ -105,7 +105,7 @@ fun DynamicIslandOverlay(
             targetWidth = 344.dp
             targetHeight = when (activeEvent) {
                 is IslandEvent.IncomingCall -> 112.dp
-                is IslandEvent.MusicPlayback -> 148.dp
+                is IslandEvent.MusicPlayback -> 174.dp
                 else -> 88.dp
             }
             targetCorner = 30.dp
@@ -113,7 +113,7 @@ fun DynamicIslandOverlay(
         IslandDisplayMode.FULL_EXPANDED -> {
             targetWidth = 364.dp
             targetHeight = when (activeEvent) {
-                is IslandEvent.MusicPlayback -> 216.dp
+                is IslandEvent.MusicPlayback -> 224.dp
                 is IslandEvent.IncomingCall -> 146.dp
                 else -> 136.dp
             }

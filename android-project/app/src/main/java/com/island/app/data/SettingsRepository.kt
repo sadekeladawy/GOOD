@@ -24,6 +24,8 @@ class SettingsRepository(private val context: Context) {
         val MASTER_ENABLED = booleanPreferencesKey("master_enabled")
         val AUTO_START_BOOT = booleanPreferencesKey("auto_start_boot")
         val HIDE_FULLSCREEN = booleanPreferencesKey("hide_fullscreen")
+        val APP_EXIT_ANIMATION = booleanPreferencesKey("app_exit_animation")
+        val ANIMATION_SPEED = floatPreferencesKey("animation_speed")
         val DISPLAY_DURATION_SEC = intPreferencesKey("display_duration_sec")
         val OFFSET_X = floatPreferencesKey("offset_x")
         val OFFSET_Y = floatPreferencesKey("offset_y")
@@ -52,6 +54,8 @@ class SettingsRepository(private val context: Context) {
                 masterEnabled = prefs[Keys.MASTER_ENABLED] ?: defaults.masterEnabled,
                 autoStartOnBoot = prefs[Keys.AUTO_START_BOOT] ?: defaults.autoStartOnBoot,
                 hideInFullscreen = prefs[Keys.HIDE_FULLSCREEN] ?: defaults.hideInFullscreen,
+                appExitAnimationEnabled = prefs[Keys.APP_EXIT_ANIMATION] ?: defaults.appExitAnimationEnabled,
+                animationSpeed = (prefs[Keys.ANIMATION_SPEED] ?: defaults.animationSpeed).coerceIn(0.5f, 2.0f),
                 displayDuration = DisplayDurationOption.fromSeconds(
                     prefs[Keys.DISPLAY_DURATION_SEC] ?: defaults.displayDuration.seconds
                 ),
@@ -74,6 +78,14 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHideInFullscreen(enabled: Boolean) {
         context.islandDataStore.edit { it[Keys.HIDE_FULLSCREEN] = enabled }
+    }
+
+    suspend fun setAppExitAnimationEnabled(enabled: Boolean) {
+        context.islandDataStore.edit { it[Keys.APP_EXIT_ANIMATION] = enabled }
+    }
+
+    suspend fun setAnimationSpeed(speed: Float) {
+        context.islandDataStore.edit { it[Keys.ANIMATION_SPEED] = speed.coerceIn(0.5f, 2.0f) }
     }
 
     suspend fun setDisplayDuration(option: DisplayDurationOption) {
@@ -111,6 +123,8 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.DISPLAY_DURATION_SEC] = d.displayDuration.seconds
             prefs[Keys.HIDE_FULLSCREEN] = d.hideInFullscreen
             prefs[Keys.AUTO_START_BOOT] = d.autoStartOnBoot
+            prefs[Keys.APP_EXIT_ANIMATION] = d.appExitAnimationEnabled
+            prefs[Keys.ANIMATION_SPEED] = d.animationSpeed
             IslandEventType.entries.forEach { prefs[Keys.eventKey(it)] = true }
         }
     }

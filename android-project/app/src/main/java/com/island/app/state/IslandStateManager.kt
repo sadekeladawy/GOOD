@@ -3,6 +3,8 @@ package com.island.app.state
 import androidx.compose.runtime.Immutable
 import com.island.app.data.IslandEventType
 import com.island.app.data.IslandSettings
+import com.island.app.model.AppTransitionDirection
+import com.island.app.model.AppTransitionEvent
 import com.island.app.model.IslandDisplayMode
 import com.island.app.model.IslandEvent
 import kotlinx.coroutines.CoroutineScope
@@ -20,7 +22,8 @@ data class IslandUiState(
     val queuedCount: Int = 0,
     val displayMode: IslandDisplayMode = IslandDisplayMode.IDLE,
     val persistentMusic: IslandEvent.MusicPlayback? = null,
-    val isFullscreenHidden: Boolean = false
+    val isFullscreenHidden: Boolean = false,
+    val activeTransition: AppTransitionEvent? = null
 )
 
 class IslandStateManager(
@@ -33,6 +36,7 @@ class IslandStateManager(
     // Accessed strictly on scope's Main.immediate dispatcher to prevent ConcurrentModificationException
     private val eventQueue = ArrayDeque<IslandEvent>()
     private var autoCollapseJob: Job? = null
+    private var postExitShrinkJob: Job? = null
 
     fun postEvent(event: IslandEvent) {
         scope.launch {
@@ -69,6 +73,68 @@ class IslandStateManager(
         }
     }
 
+    fun startAppTransition(transition: AppTransitionEvent) {
+        scope.launch {
+            val settings = settingsProvider()
+            if (!settings.masterEnabled || !settings.appExitAnimationEnabled) return@launch
+            if (!settings.isEventEnabled(IslandEventType.MUSIC_PLAYER)) return@launch
+
+            postExitShrinkJob?.cancel()
+            _uiState.update { state ->
+                if (transition.direction == AppTransitionDirection.ENTER_FROM_ISLAND) {
+                    // Collapse island into compact pill while reverse card grows out of it
+                    state.copy(
+                        activeTransition = transition,
+                        displayMode = if (state.persistentMusic != null) IslandDisplayMode.COMPACT else IslandDisplayMode.IDLE
+                    )
+                } else {
+                    state.copy(activeTransition = transition)
+                }
+            }
+        }
+    }
+
+    fun onExitAnimationReachedIsland() {
+        scope.launch {
+            val music = _uiState.value.persistentMusic ?: return@launch
+            autoCollapseJob?.cancel()
+            postExitShrinkJob?.cancel()
+
+            // Expand into music card with spring bounce, hold for 2 seconds, then shrink to compact capsule
+            _uiState.update {
+                it.copy(
+                    activeEvent = music,
+                    displayMode = IslandDisplayMode.EXPANDED
+                )
+            }
+
+            postExitShrinkJob = scope.launch {
+                delay(2000L)
+                _uiState.update { state ->
+                    if (state.activeEvent is IslandEvent.MusicPlayback &&
+                        state.displayMode == IslandDisplayMode.EXPANDED
+                    ) {
+                        state.copy(displayMode = IslandDisplayMode.COMPACT)
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    fun onAppTransitionFinished(transitionId: String) {
+        scope.launch {
+            _uiState.update { state ->
+                if (state.activeTransition?.id == transitionId) {
+                    state.copy(activeTransition = null)
+                } else {
+                    state
+                }
+            }
+        }
+    }
+
     fun clearIncomingCall() {
         scope.launch {
             val current = _uiState.value.activeEvent
@@ -83,22 +149,19 @@ class IslandStateManager(
 
     private fun handleMusicUpdate(music: IslandEvent.MusicPlayback) {
         _uiState.update { state ->
-            val updatedMusic = if (music.isPlaying || state.persistentMusic != null) {
-                music
-            } else {
-                null
-            }
+            val isEmptyReset = !music.isPlaying && music.title.isBlank()
+            val updatedMusic = if (isEmptyReset) null else music
             val shouldPromote = state.activeEvent == null || state.activeEvent is IslandEvent.MusicPlayback
             if (shouldPromote) {
                 val targetMode = when {
-                    !music.isPlaying && state.displayMode == IslandDisplayMode.IDLE -> IslandDisplayMode.IDLE
+                    updatedMusic == null -> IslandDisplayMode.IDLE
                     state.displayMode == IslandDisplayMode.EXPANDED ||
                         state.displayMode == IslandDisplayMode.FULL_EXPANDED -> state.displayMode
-                    music.isPlaying -> IslandDisplayMode.COMPACT
+                    updatedMusic.isPlaying -> IslandDisplayMode.COMPACT
                     else -> IslandDisplayMode.IDLE
                 }
                 state.copy(
-                    activeEvent = if (music.isPlaying) music else state.activeEvent as? IslandEvent.MusicPlayback,
+                    activeEvent = if (targetMode == IslandDisplayMode.IDLE) null else updatedMusic,
                     persistentMusic = updatedMusic,
                     displayMode = targetMode
                 )
@@ -166,6 +229,7 @@ class IslandStateManager(
 
     fun onIslandTap() {
         scope.launch {
+            postExitShrinkJob?.cancel()
             val state = _uiState.value
             val active = state.activeEvent ?: state.persistentMusic
             when (state.displayMode) {
@@ -195,6 +259,7 @@ class IslandStateManager(
 
     fun onIslandLongPress() {
         scope.launch {
+            postExitShrinkJob?.cancel()
             val state = _uiState.value
             val active = state.activeEvent ?: state.persistentMusic ?: return@launch
             autoCollapseJob?.cancel()
@@ -209,6 +274,7 @@ class IslandStateManager(
 
     fun collapse() {
         scope.launch {
+            postExitShrinkJob?.cancel()
             collapseInternal()
         }
     }
@@ -242,12 +308,14 @@ class IslandStateManager(
         scope.launch {
             if (!settings.masterEnabled) {
                 autoCollapseJob?.cancel()
+                postExitShrinkJob?.cancel()
                 eventQueue.clear()
                 _uiState.update {
                     it.copy(
                         activeEvent = null,
                         displayMode = IslandDisplayMode.IDLE,
-                        queuedCount = 0
+                        queuedCount = 0,
+                        activeTransition = null
                     )
                 }
             } else if (!settings.isEventEnabled(IslandEventType.MUSIC_PLAYER)) {
@@ -256,6 +324,7 @@ class IslandStateManager(
                     state.copy(
                         activeEvent = active,
                         persistentMusic = null,
+                        activeTransition = null,
                         displayMode = if (active == null) IslandDisplayMode.IDLE else state.displayMode
                     )
                 }

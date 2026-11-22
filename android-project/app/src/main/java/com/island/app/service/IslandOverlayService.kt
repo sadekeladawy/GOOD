@@ -44,8 +44,11 @@ import com.island.app.MainActivity
 import com.island.app.R
 import com.island.app.data.CrashLogger
 import com.island.app.data.IslandSettings
+import com.island.app.model.AppTransitionEvent
 import com.island.app.model.IslandDisplayMode
+import com.island.app.model.IslandEvent
 import com.island.app.state.IslandStateManager
+import com.island.app.ui.overlay.AppExitTransitionOverlay
 import com.island.app.ui.overlay.DynamicIslandOverlay
 import com.island.app.ui.theme.IslandTheme
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +57,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -71,8 +76,10 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     private var windowManager: WindowManager? = null
     private var stateManager: IslandStateManager? = null
     private var systemMonitor: SystemEventMonitor? = null
+    private var usageFallback: ForegroundAppUsageFallback? = null
 
     private var overlayContainer: FrameLayout? = null
+    private var transitionContainer: FrameLayout? = null
     private var fullscreenProbeView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private val settingsState = MutableStateFlow(IslandSettings.Default)
@@ -114,6 +121,12 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         )
         systemMonitor = monitor
 
+        val fallback = ForegroundAppUsageFallback(
+            context = this,
+            scope = serviceScope
+        )
+        usageFallback = fallback
+
         // Reach RESUMED before attaching ComposeView so WindowRecomposer starts cleanly
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
@@ -136,6 +149,11 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                 settingsState.value = settings
                 manager.onSettingsChanged(settings)
                 updateOverlayPosition(settings)
+                if (settings.masterEnabled && settings.appExitAnimationEnabled) {
+                    fallback.start()
+                } else {
+                    fallback.stop()
+                }
             }
         }
 
@@ -145,6 +163,45 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                     isExpanded = uiState.displayMode == IslandDisplayMode.EXPANDED ||
                         uiState.displayMode == IslandDisplayMode.FULL_EXPANDED
                 )
+            }
+        }
+
+        // Dynamically attach/detach the full-screen spring morph window only while an app transition runs
+        serviceScope.launch {
+            manager.uiState
+                .map { it.activeTransition }
+                .distinctUntilChanged()
+                .collectLatest { transition ->
+                    if (transition != null) {
+                        showTransitionOverlay(wm, manager, transition)
+                    } else {
+                        removeTransitionOverlay()
+                    }
+                }
+        }
+
+        // Collect live media playback StateFlow directly from MediaListenerService
+        serviceScope.launch {
+            MediaListenerService.mediaState.collect { playback ->
+                if (playback != null) {
+                    manager.postEvent(playback)
+                } else {
+                    manager.postEvent(
+                        IslandEvent.MusicPlayback(
+                            title = "",
+                            artist = "",
+                            albumArt = null,
+                            isPlaying = false
+                        )
+                    )
+                }
+            }
+        }
+
+        // Collect foreground->background / background->foreground media app transitions
+        serviceScope.launch {
+            AppForegroundTracker.transitions.collect { transition ->
+                manager.startAppTransition(transition)
             }
         }
 
@@ -170,6 +227,8 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     override fun onDestroy() {
         super.onDestroy()
         runCatching { systemMonitor?.stop() }
+        runCatching { usageFallback?.stop() }
+        removeTransitionOverlay()
         val wm = windowManager
         overlayContainer?.let { container ->
             if (container.isAttachedToWindow) {
@@ -187,6 +246,95 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         transitionLifecycleToDestroyed()
         viewModelStore.clear()
         serviceScope.cancel()
+    }
+
+    private fun showTransitionOverlay(
+        wm: WindowManager,
+        manager: IslandStateManager,
+        transition: AppTransitionEvent
+    ) {
+        removeTransitionOverlay()
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+
+        val themedContext = ContextThemeWrapper(this, R.style.Theme_Island)
+        val container = FrameLayout(themedContext).apply {
+            setViewTreeLifecycleOwner(this@IslandOverlayService)
+            setViewTreeSavedStateRegistryOwner(this@IslandOverlayService)
+            setViewTreeViewModelStoreOwner(this@IslandOverlayService)
+        }
+
+        val composeView = ComposeView(themedContext).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                CompositionLocalProvider(LocalLifecycleOwner provides this@IslandOverlayService) {
+                    val currentSettings by settingsState.collectAsState()
+                    IslandTheme(darkTheme = true, dynamicColor = false) {
+                        AppExitTransitionOverlay(
+                            transition = transition,
+                            settings = currentSettings,
+                            onReachedIsland = {
+                                runCatching {
+                                    overlayContainer?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                }
+                                manager.onExitAnimationReachedIsland()
+                            },
+                            onFinished = {
+                                manager.onAppTransitionFinished(transition.id)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        container.addView(
+            composeView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        runCatching {
+            wm.addView(container, params)
+            transitionContainer = container
+        }.onFailure {
+            CrashLogger.recordNonFatal(this, "Failed to attach AppExitTransitionOverlay", it)
+            manager.onAppTransitionFinished(transition.id)
+        }
+    }
+
+    private fun removeTransitionOverlay() {
+        val wm = windowManager ?: return
+        transitionContainer?.let { container ->
+            if (container.isAttachedToWindow) {
+                runCatching { wm.removeViewImmediate(container) }
+            }
+        }
+        transitionContainer = null
     }
 
     private fun transitionLifecycleToDestroyed() {

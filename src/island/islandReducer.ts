@@ -1,4 +1,5 @@
 import {
+  AppTransitionDirection,
   IslandDisplayMode,
   IslandEvent,
   IslandSettings,
@@ -15,11 +16,13 @@ export function createInitialIslandState(): IslandState {
     persistentMusic: null,
     isFullscreen: false,
     callStatusMessage: null,
+    activeTransition: null,
   };
 }
 
 export function clampSettings(patch: Partial<IslandSettings>, current: IslandSettings): IslandSettings {
   const next: IslandSettings = { ...current, ...patch };
+  const rawSpeed = Number.isFinite(next.animationSpeed) ? next.animationSpeed : 1.0;
   return {
     ...next,
     offsetX: Math.max(-80, Math.min(80, Math.round(next.offsetX))),
@@ -27,6 +30,7 @@ export function clampSettings(patch: Partial<IslandSettings>, current: IslandSet
     idleWidth: Math.max(84, Math.min(200, Math.round(next.idleWidth))),
     idleHeight: Math.max(24, Math.min(50, Math.round(next.idleHeight))),
     cornerRadius: Math.max(10, Math.min(32, Math.round(next.cornerRadius))),
+    animationSpeed: Math.max(0.5, Math.min(2.0, Math.round(rawSpeed * 20) / 20)),
   };
 }
 
@@ -226,6 +230,80 @@ export function toggleMusicPlayPause(state: IslandState): IslandState {
   };
 }
 
+export function seekMusic(state: IslandState, positionSec: number): IslandState {
+  if (!state.persistentMusic) return state;
+  const clamped = Math.max(0, Math.min(state.persistentMusic.durationSec, Math.round(positionSec)));
+  const updatedTrack: MusicTrack = {
+    ...state.persistentMusic,
+    positionSec: clamped,
+  };
+  const updatedEvent: IslandEvent = {
+    id: 'music_session',
+    type: 'MUSIC_PLAYER',
+    track: updatedTrack,
+  };
+  return {
+    ...state,
+    persistentMusic: updatedTrack,
+    activeEvent:
+      state.activeEvent?.type === 'MUSIC_PLAYER' ? updatedEvent : state.activeEvent,
+  };
+}
+
+export function startAppTransition(
+  state: IslandState,
+  direction: AppTransitionDirection,
+  settings: IslandSettings,
+  transitionId: string,
+  dominantColor = '#312E81'
+): IslandState {
+  if (!settings.masterEnabled || !settings.appExitAnimationEnabled || !settings.enabledEvents.MUSIC_PLAYER) {
+    return state;
+  }
+  const music = state.persistentMusic;
+  if (!music) return state;
+
+  const transition = {
+    id: transitionId,
+    direction,
+    title: music.title,
+    artist: music.artist,
+    dominantColor,
+  };
+
+  if (direction === 'ENTER_FROM_ISLAND') {
+    return {
+      ...state,
+      activeEvent: { id: 'music_session', type: 'MUSIC_PLAYER', track: music },
+      displayMode: 'COMPACT',
+      activeTransition: transition,
+    };
+  }
+
+  return {
+    ...state,
+    activeTransition: transition,
+  };
+}
+
+export function onExitAnimationReachedIsland(state: IslandState): IslandState {
+  const music = state.persistentMusic;
+  if (!music) return state;
+  return {
+    ...state,
+    activeEvent: { id: 'music_session', type: 'MUSIC_PLAYER', track: music },
+    displayMode: 'EXPANDED',
+  };
+}
+
+export function finishAppTransition(state: IslandState, transitionId: string): IslandState {
+  if (state.activeTransition?.id !== transitionId) return state;
+  return {
+    ...state,
+    activeTransition: null,
+  };
+}
+
 export function getIslandDimensions(
   mode: IslandDisplayMode,
   activeEvent: IslandEvent | null,
@@ -254,7 +332,7 @@ export function getIslandDimensions(
   if (resolvedMode === 'EXPANDED') {
     let height = 88;
     if (activeEvent?.type === 'INCOMING_CALL') height = 112;
-    if (activeEvent?.type === 'MUSIC_PLAYER') height = 148;
+    if (activeEvent?.type === 'MUSIC_PLAYER') height = 168;
     return {
       width: 332,
       height,
@@ -263,7 +341,7 @@ export function getIslandDimensions(
   }
   let height = 132;
   if (activeEvent?.type === 'INCOMING_CALL') height = 144;
-  if (activeEvent?.type === 'MUSIC_PLAYER') height = 204;
+  if (activeEvent?.type === 'MUSIC_PLAYER') height = 216;
   return {
     width: 344,
     height,

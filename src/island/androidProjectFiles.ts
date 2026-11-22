@@ -16,6 +16,7 @@ import icLauncherBgXml from '../../android-project/app/src/main/res/drawable/ic_
 import icLauncherFgXml from '../../android-project/app/src/main/res/drawable/ic_island_launcher_fg.xml?raw';
 import icLauncherAdaptiveXml from '../../android-project/app/src/main/res/drawable-v26/ic_island_launcher.xml?raw';
 import icNotifXml from '../../android-project/app/src/main/res/drawable/ic_island_notification.xml?raw';
+import accessibilityConfigXml from '../../android-project/app/src/main/res/xml/accessibility_service_config.xml?raw';
 import backupRulesXml from '../../android-project/app/src/main/res/xml/backup_rules.xml?raw';
 import dataExtractionXml from '../../android-project/app/src/main/res/xml/data_extraction_rules.xml?raw';
 import islandAppKt from '../../android-project/app/src/main/java/com/island/app/IslandApplication.kt?raw';
@@ -25,12 +26,15 @@ import islandSettingsKt from '../../android-project/app/src/main/java/com/island
 import settingsRepoKt from '../../android-project/app/src/main/java/com/island/app/data/SettingsRepository.kt?raw';
 import islandEventKt from '../../android-project/app/src/main/java/com/island/app/model/IslandEvent.kt?raw';
 import islandStateMgrKt from '../../android-project/app/src/main/java/com/island/app/state/IslandStateManager.kt?raw';
+import islandViewModelKt from '../../android-project/app/src/main/java/com/island/app/state/IslandViewModel.kt?raw';
 import eventBusKt from '../../android-project/app/src/main/java/com/island/app/service/IslandEventBus.kt?raw';
 import overlayServiceKt from '../../android-project/app/src/main/java/com/island/app/service/IslandOverlayService.kt?raw';
-import notifListenerKt from '../../android-project/app/src/main/java/com/island/app/service/IslandNotificationListenerService.kt?raw';
+import mediaListenerKt from '../../android-project/app/src/main/java/com/island/app/service/MediaListenerService.kt?raw';
+import accessibilityServiceKt from '../../android-project/app/src/main/java/com/island/app/service/IslandAccessibilityService.kt?raw';
 import systemMonitorKt from '../../android-project/app/src/main/java/com/island/app/service/SystemEventMonitor.kt?raw';
 import bootReceiverKt from '../../android-project/app/src/main/java/com/island/app/service/BootReceiver.kt?raw';
 import dynamicIslandOverlayKt from '../../android-project/app/src/main/java/com/island/app/ui/overlay/DynamicIslandOverlay.kt?raw';
+import appExitTransitionOverlayKt from '../../android-project/app/src/main/java/com/island/app/ui/overlay/AppExitTransitionOverlay.kt?raw';
 import eventCardsKt from '../../android-project/app/src/main/java/com/island/app/ui/overlay/EventCards.kt?raw';
 import settingsScreenKt from '../../android-project/app/src/main/java/com/island/app/ui/screens/SettingsScreen.kt?raw';
 import themeKt from '../../android-project/app/src/main/java/com/island/app/ui/theme/Theme.kt?raw';
@@ -101,6 +105,76 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
     content: proguardRules,
   },
   {
+    path: 'app/src/main/java/com/island/app/service/MediaListenerService.kt',
+    name: 'MediaListenerService.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: mediaListenerKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/service/IslandAccessibilityService.kt',
+    name: 'IslandAccessibilityService.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: accessibilityServiceKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/service/IslandOverlayService.kt',
+    name: 'IslandOverlayService.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: overlayServiceKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/state/IslandStateManager.kt',
+    name: 'IslandStateManager.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: islandStateMgrKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/state/IslandViewModel.kt',
+    name: 'IslandViewModel.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: islandViewModelKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/service/SystemEventMonitor.kt',
+    name: 'SystemEventMonitor.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: systemMonitorKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/service/BootReceiver.kt',
+    name: 'BootReceiver.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: bootReceiverKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/service/IslandEventBus.kt',
+    name: 'IslandEventBus.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: eventBusKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/IslandApplication.kt',
+    name: 'IslandApplication.kt',
+    category: 'Services & State',
+    language: 'kotlin',
+    content: islandAppKt,
+  },
+  {
+    path: 'app/src/main/java/com/island/app/ui/overlay/AppExitTransitionOverlay.kt',
+    name: 'AppExitTransitionOverlay.kt',
+    category: 'Compose UI',
+    language: 'kotlin',
+    content: appExitTransitionOverlayKt,
+  },
+  {
     path: 'app/src/main/java/com/island/app/ui/overlay/DynamicIslandOverlay.kt',
     name: 'DynamicIslandOverlay.kt',
     category: 'Compose UI',
@@ -136,55 +210,6 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
     content: mainActivityKt,
   },
   {
-    path: 'app/src/main/java/com/island/app/service/IslandOverlayService.kt',
-    name: 'IslandOverlayService.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: overlayServiceKt,
-  },
-  {
-    path: 'app/src/main/java/com/island/app/service/SystemEventMonitor.kt',
-    name: 'SystemEventMonitor.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: systemMonitorKt,
-  },
-  {
-    path: 'app/src/main/java/com/island/app/service/IslandNotificationListenerService.kt',
-    name: 'IslandNotificationListenerService.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: notifListenerKt,
-  },
-  {
-    path: 'app/src/main/java/com/island/app/service/BootReceiver.kt',
-    name: 'BootReceiver.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: bootReceiverKt,
-  },
-  {
-    path: 'app/src/main/java/com/island/app/service/IslandEventBus.kt',
-    name: 'IslandEventBus.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: eventBusKt,
-  },
-  {
-    path: 'app/src/main/java/com/island/app/state/IslandStateManager.kt',
-    name: 'IslandStateManager.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: islandStateMgrKt,
-  },
-  {
-    path: 'app/src/main/java/com/island/app/IslandApplication.kt',
-    name: 'IslandApplication.kt',
-    category: 'Services & State',
-    language: 'kotlin',
-    content: islandAppKt,
-  },
-  {
     path: 'app/src/main/java/com/island/app/data/CrashLogger.kt',
     name: 'CrashLogger.kt',
     category: 'Data & Resources',
@@ -211,6 +236,13 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
     category: 'Data & Resources',
     language: 'kotlin',
     content: islandEventKt,
+  },
+  {
+    path: 'app/src/main/res/xml/accessibility_service_config.xml',
+    name: 'accessibility_service_config.xml',
+    category: 'Data & Resources',
+    language: 'xml',
+    content: accessibilityConfigXml,
   },
   {
     path: 'app/src/main/res/values/strings.xml',
