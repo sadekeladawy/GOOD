@@ -298,7 +298,7 @@ class SystemEventMonitor(
             return
         }
 
-        val device: BluetoothDevice? = runCatching {
+        val device: BluetoothDevice = runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
             } else {
