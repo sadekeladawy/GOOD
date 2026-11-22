@@ -23,11 +23,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MediaListenerService : NotificationListenerService() {
@@ -35,11 +33,11 @@ class MediaListenerService : NotificationListenerService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var mediaSessionManager: MediaSessionManager? = null
     private var activeController: MediaController? = null
-    private var progressJob: Job? = null
     private var mediaCommandJob: Job? = null
     private var cachedArtSourceKey: String? = null
     private var cachedArtBitmap: Bitmap? = null
     private var cachedDominantColor: Int = IslandEvent.MusicPlayback.DEFAULT_MEDIA_COLOR
+    private var lastPublishedFingerprint: String? = null
 
     private val sessionsChangedListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
@@ -116,7 +114,6 @@ class MediaListenerService : NotificationListenerService() {
         Log.d(TAG, "onListenerDisconnected: clearing controller and requesting rebind")
         _isListenerConnected.value = false
         mediaCommandJob?.cancel()
-        progressJob?.cancel()
         runCatching { mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionsChangedListener) }
         bindController(null)
         requestRebindIfNeeded(applicationContext)
@@ -148,7 +145,6 @@ class MediaListenerService : NotificationListenerService() {
         super.onDestroy()
         Log.d(TAG, "onDestroy: MediaListenerService tearing down")
         _isListenerConnected.value = false
-        progressJob?.cancel()
         mediaCommandJob?.cancel()
         runCatching { mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionsChangedListener) }
         runCatching { activeController?.unregisterCallback(controllerCallback) }
@@ -241,10 +237,14 @@ class MediaListenerService : NotificationListenerService() {
                     controls.seekTo(command.positionMs)
                     val current = _mediaState.value
                     if (current != null) {
+                        val clampedPos = command.positionMs.coerceIn(0L, current.durationMs.coerceAtLeast(1L))
+                        val nowElapsed = SystemClock.elapsedRealtime()
                         val updated = current.copy(
-                            positionMs = command.positionMs.coerceIn(0L, current.durationMs.coerceAtLeast(1L)),
+                            positionMs = clampedPos,
+                            lastPositionUpdateTimeMs = nowElapsed,
                             timestampMs = System.currentTimeMillis()
                         )
+                        lastPublishedFingerprint = buildFingerprint(updated)
                         _mediaState.value = updated
                         IslandEventBus.emitEvent(updated)
                     }
@@ -258,16 +258,11 @@ class MediaListenerService : NotificationListenerService() {
     private fun publishCurrentMedia() {
         val controller = activeController
         if (controller == null) {
-            progressJob?.cancel()
-            _mediaState.value = null
-            IslandEventBus.emitEvent(
-                IslandEvent.MusicPlayback(
-                    title = "",
-                    artist = "",
-                    albumArt = null,
-                    isPlaying = false
-                )
-            )
+            if (_mediaState.value != null || lastPublishedFingerprint != null) {
+                lastPublishedFingerprint = null
+                _mediaState.value = null
+                IslandEventBus.emitEvent(IslandEvent.MusicSessionEnded())
+            }
             return
         }
 
@@ -327,7 +322,11 @@ class MediaListenerService : NotificationListenerService() {
         }
 
         val duration = (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(1L)
-        val position = computeInterpolatedPosition(state, duration)
+        val rawPosition = (state?.position ?: 0L).coerceIn(0L, duration)
+        val lastUpdateMs = state?.lastPositionUpdateTime
+            ?.takeIf { it > 0L }
+            ?: SystemClock.elapsedRealtime()
+        val playbackSpeed = state?.playbackSpeed?.takeIf { it > 0f } ?: 1f
 
         val playback = IslandEvent.MusicPlayback(
             title = title,
@@ -335,59 +334,27 @@ class MediaListenerService : NotificationListenerService() {
             albumArt = resolvedArt,
             dominantColorArgb = dominantColor,
             isPlaying = isPlaying,
-            positionMs = position,
+            positionMs = rawPosition,
             durationMs = duration,
+            lastPositionUpdateTimeMs = lastUpdateMs,
+            playbackSpeed = playbackSpeed,
             packageName = pkg
         )
 
+        val fingerprint = buildFingerprint(playback)
+        if (fingerprint == lastPublishedFingerprint && _mediaState.value != null) {
+            return
+        }
+        lastPublishedFingerprint = fingerprint
         _mediaState.value = playback
         IslandEventBus.emitEvent(playback)
-
-        progressJob?.cancel()
-        if (isPlaying) {
-            progressJob = scope.launch {
-                while (isActive) {
-                    delay(1000L)
-                    val current = activeController ?: break
-                    val curState = runCatching { current.playbackState }.getOrNull() ?: break
-                    if (curState.state != PlaybackState.STATE_PLAYING &&
-                        curState.state != PlaybackState.STATE_BUFFERING
-                    ) {
-                        break
-                    }
-                    val curMeta = runCatching { current.metadata }.getOrNull()
-                    val dur = (curMeta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: duration)
-                        .coerceAtLeast(1L)
-                    val livePos = computeInterpolatedPosition(curState, dur)
-                    val latest = _mediaState.value ?: playback
-                    val ticked = latest.copy(
-                        positionMs = livePos,
-                        durationMs = dur,
-                        isPlaying = true,
-                        timestampMs = System.currentTimeMillis()
-                    )
-                    _mediaState.value = ticked
-                    IslandEventBus.emitEvent(ticked)
-                }
-            }
-        }
     }
 
-    private fun computeInterpolatedPosition(state: PlaybackState?, durationMs: Long): Long {
-        if (state == null) return 0L
-        val basePos = state.position.coerceAtLeast(0L)
-        if (state.state != PlaybackState.STATE_PLAYING) {
-            return basePos.coerceIn(0L, durationMs)
-        }
-        val lastUpdate = state.lastPositionUpdateTime
-        val speed = state.playbackSpeed.takeIf { it > 0f } ?: 1f
-        val elapsed = if (lastUpdate > 0L) {
-            (SystemClock.elapsedRealtime() - lastUpdate).coerceAtLeast(0L)
-        } else {
-            0L
-        }
-        val interpolated = basePos + (elapsed * speed).toLong()
-        return interpolated.coerceIn(0L, durationMs)
+    private fun buildFingerprint(playback: IslandEvent.MusicPlayback): String {
+        return "${playback.packageName}|${playback.title}|${playback.artist}|" +
+            "${playback.isPlaying}|${playback.positionMs}|${playback.durationMs}|" +
+            "${playback.lastPositionUpdateTimeMs}|${playback.playbackSpeed}|" +
+            "${playback.dominantColorArgb}|${playback.albumArt != null}"
     }
 
     private fun resolveNotificationTitle(packageName: String): String? {

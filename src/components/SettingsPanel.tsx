@@ -141,6 +141,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             onChange={(checked) => onUpdateSettings({ hideInFullscreen: checked })}
           />
           <ToggleRow
+            id="toggle-bt-audio-only"
+            label="Audio devices only"
+            description="Only show Bluetooth cards for headphones, earbuds, and speakers"
+            checked={settings.bluetoothAudioOnly}
+            onChange={(checked) => onUpdateSettings({ bluetoothAudioOnly: checked })}
+          />
+          <ToggleRow
             id="toggle-app-exit"
             label="App exit animation"
             description="Morph Spotify / YouTube Music into the island when leaving the app (Accessibility or Usage Access)"

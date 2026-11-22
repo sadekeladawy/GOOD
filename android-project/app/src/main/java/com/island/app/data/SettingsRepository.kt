@@ -24,6 +24,7 @@ class SettingsRepository(private val context: Context) {
         val MASTER_ENABLED = booleanPreferencesKey("master_enabled")
         val AUTO_START_BOOT = booleanPreferencesKey("auto_start_boot")
         val HIDE_FULLSCREEN = booleanPreferencesKey("hide_fullscreen")
+        val BLUETOOTH_AUDIO_ONLY = booleanPreferencesKey("bluetooth_audio_only")
         val APP_EXIT_ANIMATION = booleanPreferencesKey("app_exit_animation")
         val ANIMATION_SPEED = floatPreferencesKey("animation_speed")
         val DISPLAY_DURATION_SEC = intPreferencesKey("display_duration_sec")
@@ -54,6 +55,7 @@ class SettingsRepository(private val context: Context) {
                 masterEnabled = prefs[Keys.MASTER_ENABLED] ?: defaults.masterEnabled,
                 autoStartOnBoot = prefs[Keys.AUTO_START_BOOT] ?: defaults.autoStartOnBoot,
                 hideInFullscreen = prefs[Keys.HIDE_FULLSCREEN] ?: defaults.hideInFullscreen,
+                bluetoothAudioOnly = prefs[Keys.BLUETOOTH_AUDIO_ONLY] ?: defaults.bluetoothAudioOnly,
                 appExitAnimationEnabled = prefs[Keys.APP_EXIT_ANIMATION] ?: defaults.appExitAnimationEnabled,
                 animationSpeed = (prefs[Keys.ANIMATION_SPEED] ?: defaults.animationSpeed).coerceIn(0.5f, 2.0f),
                 displayDuration = DisplayDurationOption.fromSeconds(
@@ -78,6 +80,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHideInFullscreen(enabled: Boolean) {
         context.islandDataStore.edit { it[Keys.HIDE_FULLSCREEN] = enabled }
+    }
+
+    suspend fun setBluetoothAudioOnly(enabled: Boolean) {
+        context.islandDataStore.edit { it[Keys.BLUETOOTH_AUDIO_ONLY] = enabled }
     }
 
     suspend fun setAppExitAnimationEnabled(enabled: Boolean) {
@@ -122,6 +128,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.CORNER_RADIUS] = d.cornerRadiusDp
             prefs[Keys.DISPLAY_DURATION_SEC] = d.displayDuration.seconds
             prefs[Keys.HIDE_FULLSCREEN] = d.hideInFullscreen
+            prefs[Keys.BLUETOOTH_AUDIO_ONLY] = d.bluetoothAudioOnly
             prefs[Keys.AUTO_START_BOOT] = d.autoStartOnBoot
             prefs[Keys.APP_EXIT_ANIMATION] = d.appExitAnimationEnabled
             prefs[Keys.ANIMATION_SPEED] = d.animationSpeed

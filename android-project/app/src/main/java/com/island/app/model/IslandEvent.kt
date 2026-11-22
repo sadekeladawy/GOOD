@@ -157,6 +157,8 @@ sealed interface IslandEvent {
         val isPlaying: Boolean,
         val positionMs: Long = 0L,
         val durationMs: Long = 1L,
+        val lastPositionUpdateTimeMs: Long = 0L,
+        val playbackSpeed: Float = 1f,
         val packageName: String = "",
         override val id: String = "music_session",
         override val timestampMs: Long = System.currentTimeMillis()
@@ -167,5 +169,13 @@ sealed interface IslandEvent {
         companion object {
             const val DEFAULT_MEDIA_COLOR: Int = 0xFF1A1D2B.toInt()
         }
+    }
+
+    @Immutable
+    data class MusicSessionEnded(
+        override val id: String = UUID.randomUUID().toString(),
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : IslandEvent {
+        override val type = IslandEventType.MUSIC_PLAYER
     }
 }

@@ -167,11 +167,17 @@ fun DynamicIslandOverlay(
             }
             .pointerInput(mode) {
                 var cumulativeDrag = 0f
+                var triggered = false
                 detectVerticalDragGestures(
-                    onDragStart = { cumulativeDrag = 0f },
+                    onDragStart = {
+                        cumulativeDrag = 0f
+                        triggered = false
+                    },
                     onVerticalDrag = { _, dragAmount ->
+                        if (triggered) return@detectVerticalDragGestures
                         cumulativeDrag += dragAmount
                         if (cumulativeDrag < -24f && mode != IslandDisplayMode.IDLE) {
+                            triggered = true
                             onSwipeUp()
                         }
                     }

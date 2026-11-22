@@ -39,6 +39,7 @@ data class IslandSettings(
     val masterEnabled: Boolean = true,
     val autoStartOnBoot: Boolean = true,
     val hideInFullscreen: Boolean = true,
+    val bluetoothAudioOnly: Boolean = true,
     val appExitAnimationEnabled: Boolean = true,
     val animationSpeed: Float = 1.0f,  // 0.5x (slower) .. 2.0x (faster)
     val displayDuration: DisplayDurationOption = DisplayDurationOption.MEDIUM,

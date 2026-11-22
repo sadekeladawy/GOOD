@@ -12,6 +12,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -20,12 +23,19 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.island.app.data.CrashLogger
+import com.island.app.data.IslandEventType
 import com.island.app.service.AppForegroundTracker
 import com.island.app.service.IslandOverlayService
 import com.island.app.service.MediaListenerService
 import com.island.app.state.IslandViewModel
 import com.island.app.ui.screens.SettingsScreen
 import com.island.app.ui.theme.IslandTheme
+
+private data class PermissionRationaleRequest(
+    val title: String,
+    val message: String,
+    val permissions: List<String>
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -34,6 +44,7 @@ class MainActivity : ComponentActivity() {
     private var hasAccessibilityAccess by mutableStateOf(false)
     private var hasUsageStatsAccess by mutableStateOf(false)
     private var lastCrashLog by mutableStateOf<String?>(null)
+    private var pendingPermissionRationale by mutableStateOf<PermissionRationaleRequest?>(null)
     private var permissionsRequestedOnce = false
 
     private val runtimePermissionsLauncher = registerForActivityResult(
@@ -51,7 +62,7 @@ class MainActivity : ComponentActivity() {
 
         if (savedInstanceState == null && !permissionsRequestedOnce) {
             permissionsRequestedOnce = true
-            requestMissingRuntimePermissions()
+            requestStartupNotificationPermission()
         }
 
         val viewModel = ViewModelProvider(this)[IslandViewModel::class.java]
@@ -91,6 +102,7 @@ class MainActivity : ComponentActivity() {
                         CrashLogger.clearLastCrash(this@MainActivity)
                         lastCrashLog = null
                     },
+                    onShareCrashLog = { shareCrashLog() },
                     onRequestOverlayPermission = { openOverlaySettings() },
                     onRequestNotificationAccess = { openNotificationListenerSettings() },
                     onReconnectMediaListener = {
@@ -101,6 +113,7 @@ class MainActivity : ComponentActivity() {
                     onMasterToggle = { viewModel.setMasterEnabled(it) },
                     onAutoStartToggle = { viewModel.setAutoStartOnBoot(it) },
                     onHideFullscreenToggle = { viewModel.setHideInFullscreen(it) },
+                    onBluetoothAudioOnlyToggle = { viewModel.setBluetoothAudioOnly(it) },
                     onAppExitAnimationToggle = { viewModel.setAppExitAnimationEnabled(it) },
                     onAnimationSpeedChange = { viewModel.setAnimationSpeed(it) },
                     onDurationChange = { viewModel.setDisplayDuration(it) },
@@ -109,11 +122,42 @@ class MainActivity : ComponentActivity() {
                     },
                     onEventToggle = { type, enabled ->
                         viewModel.setEventEnabled(type, enabled)
+                        if (enabled) {
+                            maybePromptForEventPermissions(type)
+                        }
                     },
                     onResetToDefault = { viewModel.resetToDefault() },
                     onTriggerTestEvent = { viewModel.triggerTestEvent(it) },
                     onTestAppExitAnimation = { viewModel.triggerTestAppExitAnimation() }
                 )
+
+                pendingPermissionRationale?.let { request ->
+                    AlertDialog(
+                        onDismissRequest = { pendingPermissionRationale = null },
+                        title = { Text(request.title) },
+                        text = { Text(request.message) },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    val perms = request.permissions
+                                    pendingPermissionRationale = null
+                                    if (perms.isNotEmpty()) {
+                                        runCatching {
+                                            runtimePermissionsLauncher.launch(perms.toTypedArray())
+                                        }
+                                    }
+                                }
+                            ) {
+                                Text("Continue")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { pendingPermissionRationale = null }) {
+                                Text("Not now")
+                            }
+                        }
+                    )
+                }
             }
         }
     }
@@ -139,6 +183,18 @@ class MainActivity : ComponentActivity() {
         val cn = ComponentName(this, MediaListenerService::class.java)
         val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
         return flat.split(":").any { ComponentName.unflattenFromString(it) == cn }
+    }
+
+    private fun shareCrashLog() {
+        val log = lastCrashLog ?: CrashLogger.readLastCrash(this) ?: return
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Island Diagnostics Log")
+            putExtra(Intent.EXTRA_TEXT, log)
+        }
+        runCatching {
+            startActivity(Intent.createChooser(shareIntent, "Share Diagnostics Log"))
+        }
     }
 
     private fun openOverlaySettings() {
@@ -175,26 +231,79 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestMissingRuntimePermissions() {
-        val candidates = buildList {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                add(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            add(Manifest.permission.ACCESS_COARSE_LOCATION)
-            add(Manifest.permission.ACCESS_FINE_LOCATION)
-            add(Manifest.permission.READ_PHONE_STATE)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                add(Manifest.permission.ANSWER_PHONE_CALLS)
+    /**
+     * Request only POST_NOTIFICATIONS on first launch so the foreground service
+     * notification is allowed on Android 13+. Other event permissions are requested
+     * on demand with an explanation when the user enables those specific cards.
+     */
+    private fun requestStartupNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            runCatching {
+                runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
             }
         }
-        val missing = candidates.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isNotEmpty()) {
-            runCatching { runtimePermissionsLauncher.launch(missing.toTypedArray()) }
+    }
+
+    private fun maybePromptForEventPermissions(type: IslandEventType) {
+        when (type) {
+            IslandEventType.WIFI_CONNECTED -> {
+                val hasFine = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+                val hasCoarse = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasFine && !hasCoarse) {
+                    pendingPermissionRationale = PermissionRationaleRequest(
+                        title = "Show Wi-Fi network names",
+                        message = "Android requires Location permission to read the connected Wi-Fi network name (SSID). If you skip this, the card still works and shows \"Wi-Fi Network\".",
+                        permissions = listOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                }
+            }
+            IslandEventType.BLUETOOTH -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!granted) {
+                        pendingPermissionRationale = PermissionRationaleRequest(
+                            title = "Show Bluetooth device names",
+                            message = "Nearby devices permission lets Island display the name of connected headphones or speakers. If you skip this, the card still works and shows \"Bluetooth Device\".",
+                            permissions = listOf(Manifest.permission.BLUETOOTH_CONNECT)
+                        )
+                    }
+                }
+            }
+            IslandEventType.INCOMING_CALL -> {
+                val needed = buildList {
+                    add(Manifest.permission.READ_PHONE_STATE)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        add(Manifest.permission.ANSWER_PHONE_CALLS)
+                    }
+                }.filter {
+                    ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+                }
+                if (needed.isNotEmpty()) {
+                    pendingPermissionRationale = PermissionRationaleRequest(
+                        title = "Incoming call controls",
+                        message = "Phone permissions let Island detect incoming calls and answer or decline them from the capsule. If you skip this, the card still works with \"Incoming Call\" and opens your dialer.",
+                        permissions = needed
+                    )
+                }
+            }
+            else -> Unit
         }
     }
 }

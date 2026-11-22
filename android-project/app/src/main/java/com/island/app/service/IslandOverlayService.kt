@@ -117,7 +117,8 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         val monitor = SystemEventMonitor(
             context = this,
             scope = serviceScope,
-            stateManager = manager
+            stateManager = manager,
+            settingsProvider = { settingsState.value }
         )
         systemMonitor = monitor
 
@@ -182,18 +183,14 @@ class IslandOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner,
 
         // Collect live media playback StateFlow directly from MediaListenerService
         serviceScope.launch {
+            var hadMedia = false
             MediaListenerService.mediaState.collect { playback ->
                 if (playback != null) {
+                    hadMedia = true
                     manager.postEvent(playback)
-                } else {
-                    manager.postEvent(
-                        IslandEvent.MusicPlayback(
-                            title = "",
-                            artist = "",
-                            albumArt = null,
-                            isPlaying = false
-                        )
-                    )
+                } else if (hadMedia) {
+                    hadMedia = false
+                    manager.postEvent(IslandEvent.MusicSessionEnded())
                 }
             }
         }

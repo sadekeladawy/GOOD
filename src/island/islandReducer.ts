@@ -52,37 +52,77 @@ export function isStickyEvent(event: IslandEvent): boolean {
   return false;
 }
 
+function handleMusicSessionEnded(state: IslandState): IslandState {
+  if (state.activeEvent?.type === 'MUSIC_PLAYER') {
+    return advanceOrCollapseIsland({
+      ...state,
+      persistentMusic: null,
+    });
+  }
+  return {
+    ...state,
+    persistentMusic: null,
+  };
+}
+
+function resolveExpandableCandidate(state: IslandState): IslandEvent | null {
+  const candidate: IslandEvent | null =
+    state.activeEvent ??
+    (state.persistentMusic
+      ? { id: 'music_session', type: 'MUSIC_PLAYER', track: state.persistentMusic }
+      : null);
+
+  if (!candidate) return null;
+  if (candidate.type === 'MUSIC_SESSION_ENDED') return null;
+  if (candidate.type === 'MUSIC_PLAYER' && candidate.track.title.trim().length === 0) {
+    return null;
+  }
+  return candidate;
+}
+
 export function enqueueIslandEvent(
   state: IslandState,
   event: IslandEvent,
   settings: IslandSettings
 ): IslandState {
-  if (!settings.masterEnabled || !settings.enabledEvents[event.type]) {
+  if (!settings.masterEnabled) {
+    return state;
+  }
+
+  if (event.type === 'MUSIC_SESSION_ENDED') {
+    return handleMusicSessionEnded(state);
+  }
+
+  if (!settings.enabledEvents[event.type]) {
+    return state;
+  }
+
+  if (event.type === 'BLUETOOTH' && settings.bluetoothAudioOnly && !event.isAudio) {
     return state;
   }
 
   if (event.type === 'MUSIC_PLAYER') {
     const track = event.track;
+    if (track.title.trim().length === 0) {
+      return handleMusicSessionEnded(state);
+    }
     const shouldPromote = !state.activeEvent || state.activeEvent.type === 'MUSIC_PLAYER';
     if (!shouldPromote) {
       return { ...state, persistentMusic: track };
     }
-    if (!track.isPlaying) {
-      return {
-        ...state,
-        persistentMusic: track,
-        activeEvent: state.displayMode === 'IDLE' ? null : event,
-        displayMode: state.displayMode === 'IDLE' ? 'IDLE' : state.displayMode,
-      };
-    }
+    const isExpanded =
+      state.displayMode === 'EXPANDED' || state.displayMode === 'FULL_EXPANDED';
+    const targetMode: IslandDisplayMode = isExpanded
+      ? state.displayMode
+      : track.isPlaying
+      ? 'COMPACT'
+      : 'IDLE';
+
     return {
       ...state,
       persistentMusic: track,
-      activeEvent: event,
-      displayMode:
-        state.displayMode === 'EXPANDED' || state.displayMode === 'FULL_EXPANDED'
-          ? state.displayMode
-          : 'COMPACT',
+      activeEvent: targetMode === 'IDLE' ? null : event,
+      displayMode: targetMode,
     };
   }
 
@@ -102,6 +142,16 @@ export function enqueueIslandEvent(
       ...state,
       activeEvent: event,
       displayMode: 'COMPACT',
+    };
+  }
+
+  const existingIndex = state.queue.findIndex((item) => item.type === event.type);
+  if (existingIndex >= 0) {
+    const updatedQueue = [...state.queue];
+    updatedQueue[existingIndex] = event;
+    return {
+      ...state,
+      queue: updatedQueue,
     };
   }
 
@@ -145,11 +195,7 @@ export function advanceOrCollapseIsland(state: IslandState): IslandState {
 }
 
 export function tapIsland(state: IslandState): IslandState {
-  const candidate: IslandEvent | null =
-    state.activeEvent ??
-    (state.persistentMusic
-      ? { id: 'music_session', type: 'MUSIC_PLAYER', track: state.persistentMusic }
-      : null);
+  const candidate = resolveExpandableCandidate(state);
 
   if (state.displayMode === 'IDLE') {
     if (!candidate) return state;
@@ -157,18 +203,15 @@ export function tapIsland(state: IslandState): IslandState {
   }
 
   if (state.displayMode === 'COMPACT') {
-    return { ...state, displayMode: 'EXPANDED' };
+    if (!candidate) return collapseIsland(state);
+    return { ...state, activeEvent: candidate, displayMode: 'EXPANDED' };
   }
 
   return collapseIsland(state);
 }
 
 export function longPressIsland(state: IslandState): IslandState {
-  const candidate: IslandEvent | null =
-    state.activeEvent ??
-    (state.persistentMusic
-      ? { id: 'music_session', type: 'MUSIC_PLAYER', track: state.persistentMusic }
-      : null);
+  const candidate = resolveExpandableCandidate(state);
 
   if (!candidate) return state;
   return {

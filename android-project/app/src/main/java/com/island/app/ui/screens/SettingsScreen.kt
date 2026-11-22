@@ -35,7 +35,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -69,6 +71,7 @@ fun SettingsScreen(
     activeMediaTitle: String? = null,
     lastCrashLog: String? = null,
     onClearCrashLog: () -> Unit = {},
+    onShareCrashLog: () -> Unit = {},
     onRequestOverlayPermission: () -> Unit,
     onRequestNotificationAccess: () -> Unit,
     onReconnectMediaListener: () -> Unit,
@@ -77,6 +80,7 @@ fun SettingsScreen(
     onMasterToggle: (Boolean) -> Unit,
     onAutoStartToggle: (Boolean) -> Unit,
     onHideFullscreenToggle: (Boolean) -> Unit,
+    onBluetoothAudioOnlyToggle: (Boolean) -> Unit = {},
     onAppExitAnimationToggle: (Boolean) -> Unit,
     onAnimationSpeedChange: (Float) -> Unit,
     onDurationChange: (DisplayDurationOption) -> Unit,
@@ -88,6 +92,40 @@ fun SettingsScreen(
 ) {
     var previewEvent by remember { mutableStateOf<IslandEvent?>(null) }
     var previewMode by remember { mutableStateOf(IslandDisplayMode.IDLE) }
+
+    // Hold slider values locally so dragging updates the live preview at 60/120fps
+    // without writing to DataStore on every pixel movement.
+    var draftOffsetX by remember { mutableFloatStateOf(settings.offsetX) }
+    var draftOffsetY by remember { mutableFloatStateOf(settings.offsetY) }
+    var draftIdleWidth by remember { mutableFloatStateOf(settings.idleWidthDp) }
+    var draftIdleHeight by remember { mutableFloatStateOf(settings.idleHeightDp) }
+    var draftCornerRadius by remember { mutableFloatStateOf(settings.cornerRadiusDp) }
+    var draftAnimationSpeed by remember { mutableFloatStateOf(settings.animationSpeed) }
+
+    LaunchedEffect(
+        settings.offsetX,
+        settings.offsetY,
+        settings.idleWidthDp,
+        settings.idleHeightDp,
+        settings.cornerRadiusDp,
+        settings.animationSpeed
+    ) {
+        draftOffsetX = settings.offsetX
+        draftOffsetY = settings.offsetY
+        draftIdleWidth = settings.idleWidthDp
+        draftIdleHeight = settings.idleHeightDp
+        draftCornerRadius = settings.cornerRadiusDp
+        draftAnimationSpeed = settings.animationSpeed
+    }
+
+    val previewSettings = settings.copy(
+        offsetX = draftOffsetX,
+        offsetY = draftOffsetY,
+        idleWidthDp = draftIdleWidth,
+        idleHeightDp = draftIdleHeight,
+        cornerRadiusDp = draftCornerRadius,
+        animationSpeed = draftAnimationSpeed
+    )
 
     Scaffold(
         topBar = {
@@ -125,7 +163,7 @@ fun SettingsScreen(
         ) {
             // Live Preview anchored at the top so slider adjustments reflect immediately
             LiveIslandPreviewCard(
-                settings = settings,
+                settings = previewSettings,
                 previewEvent = previewEvent,
                 previewMode = previewMode,
                 onTapPreview = {
@@ -184,10 +222,16 @@ fun SettingsScreen(
                                     Text(
                                         text = "Last Diagnostics Log",
                                         style = MaterialTheme.typography.titleMedium,
-                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    OutlinedButton(onClick = onClearCrashLog) {
-                                        Text("Dismiss")
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedButton(onClick = onShareCrashLog) {
+                                            Text("Share")
+                                        }
+                                        OutlinedButton(onClick = onClearCrashLog) {
+                                            Text("Dismiss")
+                                        }
                                     }
                                 }
                                 Text(
@@ -218,11 +262,12 @@ fun SettingsScreen(
 
                 item {
                     AppExitAnimationCard(
-                        settings = settings,
+                        settings = previewSettings,
                         hasAccessibilityAccess = hasAccessibilityAccess,
                         hasUsageStatsAccess = hasUsageStatsAccess,
                         onAppExitAnimationToggle = onAppExitAnimationToggle,
-                        onAnimationSpeedChange = onAnimationSpeedChange,
+                        onAnimationSpeedDraftChange = { draftAnimationSpeed = it },
+                        onAnimationSpeedCommit = { onAnimationSpeedChange(draftAnimationSpeed) },
                         onRequestAccessibilityAccess = onRequestAccessibilityAccess,
                         onRequestUsageAccess = onRequestUsageAccess,
                         onTestAppExitAnimation = onTestAppExitAnimation
@@ -231,8 +276,15 @@ fun SettingsScreen(
 
                 item {
                     PositionAndSizeCard(
-                        settings = settings,
-                        onPositionSizeChange = onPositionSizeChange,
+                        settings = previewSettings,
+                        onOffsetXDraftChange = { draftOffsetX = it },
+                        onOffsetYDraftChange = { draftOffsetY = it },
+                        onWidthDraftChange = { draftIdleWidth = it },
+                        onHeightDraftChange = { draftIdleHeight = it },
+                        onCornerDraftChange = { draftCornerRadius = it },
+                        onPositionSizeCommit = { x, y, w, h, r ->
+                            onPositionSizeChange(x, y, w, h, r)
+                        },
                         onResetToDefault = onResetToDefault
                     )
                 }
@@ -242,6 +294,7 @@ fun SettingsScreen(
                         settings = settings,
                         onAutoStartToggle = onAutoStartToggle,
                         onHideFullscreenToggle = onHideFullscreenToggle,
+                        onBluetoothAudioOnlyToggle = onBluetoothAudioOnlyToggle,
                         onDurationChange = onDurationChange
                     )
                 }
@@ -502,7 +555,8 @@ private fun AppExitAnimationCard(
     hasAccessibilityAccess: Boolean,
     hasUsageStatsAccess: Boolean,
     onAppExitAnimationToggle: (Boolean) -> Unit,
-    onAnimationSpeedChange: (Float) -> Unit,
+    onAnimationSpeedDraftChange: (Float) -> Unit,
+    onAnimationSpeedCommit: () -> Unit,
     onRequestAccessibilityAccess: () -> Unit,
     onRequestUsageAccess: () -> Unit,
     onTestAppExitAnimation: () -> Unit
@@ -543,7 +597,8 @@ private fun AppExitAnimationCard(
                 valueText = String.format(Locale.US, "%.2fx", settings.animationSpeed),
                 value = settings.animationSpeed,
                 range = 0.5f..2.0f,
-                onValueChange = onAnimationSpeedChange
+                onValueChange = onAnimationSpeedDraftChange,
+                onValueChangeFinished = onAnimationSpeedCommit
             )
 
             if (settings.appExitAnimationEnabled && !hasAccessibilityAccess && !hasUsageStatsAccess) {
@@ -577,7 +632,12 @@ private fun AppExitAnimationCard(
 @Composable
 private fun PositionAndSizeCard(
     settings: IslandSettings,
-    onPositionSizeChange: (Float?, Float?, Float?, Float?, Float?) -> Unit,
+    onOffsetXDraftChange: (Float) -> Unit,
+    onOffsetYDraftChange: (Float) -> Unit,
+    onWidthDraftChange: (Float) -> Unit,
+    onHeightDraftChange: (Float) -> Unit,
+    onCornerDraftChange: (Float) -> Unit,
+    onPositionSizeCommit: (Float?, Float?, Float?, Float?, Float?) -> Unit,
     onResetToDefault: () -> Unit
 ) {
     Surface(
@@ -610,7 +670,8 @@ private fun PositionAndSizeCard(
                 valueText = "${settings.offsetY.roundToInt()} dp",
                 value = settings.offsetY,
                 range = 0f..96f,
-                onValueChange = { onPositionSizeChange(null, it, null, null, null) }
+                onValueChange = onOffsetYDraftChange,
+                onValueChangeFinished = { onPositionSizeCommit(null, settings.offsetY, null, null, null) }
             )
 
             SettingSliderRow(
@@ -618,7 +679,8 @@ private fun PositionAndSizeCard(
                 valueText = "${settings.offsetX.roundToInt()} dp",
                 value = settings.offsetX,
                 range = -120f..120f,
-                onValueChange = { onPositionSizeChange(it, null, null, null, null) }
+                onValueChange = onOffsetXDraftChange,
+                onValueChangeFinished = { onPositionSizeCommit(settings.offsetX, null, null, null, null) }
             )
 
             SettingSliderRow(
@@ -626,7 +688,8 @@ private fun PositionAndSizeCard(
                 valueText = "${settings.idleWidthDp.roundToInt()} dp",
                 value = settings.idleWidthDp,
                 range = 84f..220f,
-                onValueChange = { onPositionSizeChange(null, null, it, null, null) }
+                onValueChange = onWidthDraftChange,
+                onValueChangeFinished = { onPositionSizeCommit(null, null, settings.idleWidthDp, null, null) }
             )
 
             SettingSliderRow(
@@ -634,7 +697,8 @@ private fun PositionAndSizeCard(
                 valueText = "${settings.idleHeightDp.roundToInt()} dp",
                 value = settings.idleHeightDp,
                 range = 24f..54f,
-                onValueChange = { onPositionSizeChange(null, null, null, it, null) }
+                onValueChange = onHeightDraftChange,
+                onValueChangeFinished = { onPositionSizeCommit(null, null, null, settings.idleHeightDp, null) }
             )
 
             SettingSliderRow(
@@ -642,7 +706,8 @@ private fun PositionAndSizeCard(
                 valueText = "${settings.cornerRadiusDp.roundToInt()} dp",
                 value = settings.cornerRadiusDp,
                 range = 12f..36f,
-                onValueChange = { onPositionSizeChange(null, null, null, null, it) }
+                onValueChange = onCornerDraftChange,
+                onValueChangeFinished = { onPositionSizeCommit(null, null, null, null, settings.cornerRadiusDp) }
             )
         }
     }
@@ -654,7 +719,8 @@ private fun SettingSliderRow(
     valueText: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
-    onValueChange: (Float) -> Unit
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit = {}
 ) {
     Column {
         Row(
@@ -671,6 +737,7 @@ private fun SettingSliderRow(
         Slider(
             value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
             valueRange = range
         )
     }
@@ -681,6 +748,7 @@ private fun GeneralBehaviorCard(
     settings: IslandSettings,
     onAutoStartToggle: (Boolean) -> Unit,
     onHideFullscreenToggle: (Boolean) -> Unit,
+    onBluetoothAudioOnlyToggle: (Boolean) -> Unit,
     onDurationChange: (DisplayDurationOption) -> Unit
 ) {
     Surface(
@@ -749,6 +817,25 @@ private fun GeneralBehaviorCard(
                 Switch(
                     checked = settings.hideInFullscreen,
                     onCheckedChange = onHideFullscreenToggle
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Audio devices only", fontWeight = FontWeight.Medium)
+                    Text(
+                        "Ignore non-audio Bluetooth trackers, watches, and cars",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.bluetoothAudioOnly,
+                    onCheckedChange = onBluetoothAudioOnlyToggle
                 )
             }
         }

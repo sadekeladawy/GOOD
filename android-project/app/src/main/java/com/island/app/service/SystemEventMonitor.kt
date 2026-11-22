@@ -18,11 +18,13 @@ import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import com.island.app.data.CrashLogger
+import com.island.app.data.IslandSettings
 import com.island.app.model.IslandEvent
 import com.island.app.model.RingerMode
 import com.island.app.state.IslandStateManager
@@ -34,7 +36,8 @@ import kotlinx.coroutines.launch
 class SystemEventMonitor(
     private val context: Context,
     private val scope: CoroutineScope,
-    private val stateManager: IslandStateManager
+    private val stateManager: IslandStateManager,
+    private val settingsProvider: () -> IslandSettings = { IslandSettings.Default }
 ) {
     private val connectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -48,6 +51,7 @@ class SystemEventMonitor(
     private var warned20 = false
     private var warned10 = false
     private var notifiedFull = false
+    private var wifiBaselineRecorded = false
     private var lastWifiConnected: Boolean? = null
     private var lastWifiSsid: String? = null
     private var lastHotspotEnabled: Boolean? = null
@@ -55,6 +59,7 @@ class SystemEventMonitor(
         audioManager?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
     }.getOrDefault(AudioManager.RINGER_MODE_NORMAL)
     private var lastAirplaneMode: Boolean? = null
+    private val lastBluetoothEvents = mutableMapOf<String, Pair<Boolean, Long>>()
     private var isRegistered = false
     private var callCommandJob: Job? = null
 
@@ -145,6 +150,12 @@ class SystemEventMonitor(
 
     private fun dispatchWifiConnected(ssid: String) {
         scope.launch {
+            if (!wifiBaselineRecorded) {
+                wifiBaselineRecorded = true
+                lastWifiConnected = true
+                lastWifiSsid = ssid
+                return@launch
+            }
             if (lastWifiConnected != true || lastWifiSsid != ssid) {
                 lastWifiConnected = true
                 lastWifiSsid = ssid
@@ -155,6 +166,12 @@ class SystemEventMonitor(
 
     private fun dispatchWifiLost() {
         scope.launch {
+            if (!wifiBaselineRecorded) {
+                wifiBaselineRecorded = true
+                lastWifiConnected = false
+                lastWifiSsid = null
+                return@launch
+            }
             if (lastWifiConnected == true) {
                 lastWifiConnected = false
                 val prev = lastWifiSsid
@@ -167,6 +184,7 @@ class SystemEventMonitor(
     fun start() {
         if (isRegistered) return
         isRegistered = true
+        wifiBaselineRecorded = false
 
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
@@ -184,7 +202,7 @@ class SystemEventMonitor(
                 context,
                 systemReceiver,
                 filter,
-                ContextCompat.RECEIVER_EXPORTED
+                ContextCompat.RECEIVER_NOT_EXPORTED
             )
         }.onFailure {
             CrashLogger.recordNonFatal(context, "registerReceiver failed", it)
@@ -206,6 +224,7 @@ class SystemEventMonitor(
     fun stop() {
         if (!isRegistered) return
         isRegistered = false
+        wifiBaselineRecorded = false
         callCommandJob?.cancel()
         callCommandJob = null
         runCatching { context.unregisterReceiver(systemReceiver) }
@@ -263,10 +282,12 @@ class SystemEventMonitor(
 
     @SuppressLint("MissingPermission")
     private fun handleBluetoothEvent(intent: Intent, connected: Boolean) {
+        val now = SystemClock.elapsedRealtime()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
             != PackageManager.PERMISSION_GRANTED
         ) {
+            if (shouldDebounceBluetooth("generic_bt", connected, now)) return
             stateManager.postEvent(
                 IslandEvent.BluetoothChanged(
                     deviceName = "Bluetooth Device",
@@ -295,9 +316,18 @@ class SystemEventMonitor(
                 deviceClass == BluetoothClass.Device.AUDIO_VIDEO_LOUDSPEAKER
         }.getOrDefault(false)
 
+        if (settingsProvider().bluetoothAudioOnly && !isAudio) {
+            return
+        }
+
         val name = runCatching {
             device.name?.takeIf { it.isNotBlank() }
         }.getOrNull() ?: "Bluetooth Device"
+
+        val deviceKey = runCatching { device.address?.takeIf { it.isNotBlank() } }.getOrNull() ?: name
+        if (shouldDebounceBluetooth(deviceKey, connected, now)) {
+            return
+        }
 
         stateManager.postEvent(
             IslandEvent.BluetoothChanged(
@@ -306,6 +336,15 @@ class SystemEventMonitor(
                 isAudioDevice = isAudio
             )
         )
+    }
+
+    private fun shouldDebounceBluetooth(deviceKey: String, connected: Boolean, nowMs: Long): Boolean {
+        val previous = lastBluetoothEvents[deviceKey]
+        if (previous != null && previous.first == connected && (nowMs - previous.second) < BLUETOOTH_DEBOUNCE_MS) {
+            return true
+        }
+        lastBluetoothEvents[deviceKey] = connected to nowMs
+        return false
     }
 
     @SuppressLint("MissingPermission")
@@ -334,23 +373,59 @@ class SystemEventMonitor(
     @SuppressLint("MissingPermission")
     private fun handleCallCommand(command: CallCommand) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            stateManager.clearIncomingCall()
+            CrashLogger.recordNonFatal(
+                context,
+                "Call control $command requires Android 9 (API 28) or higher"
+            )
+            openDefaultDialer()
             return
         }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            stateManager.clearIncomingCall()
+            CrashLogger.recordNonFatal(
+                context,
+                "Missing ANSWER_PHONE_CALLS permission for call action $command"
+            )
+            openDefaultDialer()
             return
         }
         val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
-        runCatching {
-            when (command) {
-                CallCommand.Accept -> telecom?.acceptRingingCall()
-                CallCommand.Decline -> telecom?.endCall()
-            }
+        if (telecom == null) {
+            CrashLogger.recordNonFatal(context, "TelecomManager unavailable for call action $command")
+            openDefaultDialer()
+            return
         }
-        stateManager.clearIncomingCall()
+
+        val succeeded = runCatching {
+            when (command) {
+                CallCommand.Accept -> {
+                    telecom.acceptRingingCall()
+                    true
+                }
+                CallCommand.Decline -> telecom.endCall()
+            }
+        }.onFailure { err ->
+            CrashLogger.recordNonFatal(context, "TelecomManager call action $command threw", err)
+        }.getOrDefault(false)
+
+        if (succeeded) {
+            stateManager.clearIncomingCall()
+        } else {
+            CrashLogger.recordNonFatal(context, "TelecomManager call action $command did not complete")
+            openDefaultDialer()
+        }
+    }
+
+    private fun openDefaultDialer() {
+        runCatching {
+            val dialIntent = Intent(Intent.ACTION_DIAL).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(dialIntent)
+        }.onFailure { err ->
+            CrashLogger.recordNonFatal(context, "Unable to open default dialer", err)
+        }
     }
 
     private fun readCurrentBatteryPercent(): Int {
@@ -379,4 +454,8 @@ class SystemEventMonitor(
     private fun isAirplaneModeOn(): Boolean = runCatching {
         Settings.Global.getInt(context.contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) != 0
     }.getOrDefault(false)
+
+    companion object {
+        private const val BLUETOOTH_DEBOUNCE_MS = 5_000L
+    }
 }

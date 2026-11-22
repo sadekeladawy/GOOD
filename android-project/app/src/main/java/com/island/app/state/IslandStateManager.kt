@@ -46,7 +46,23 @@ class IslandStateManager(
 
     private fun handlePostEvent(event: IslandEvent) {
         val settings = settingsProvider()
-        if (!settings.masterEnabled || !settings.isEventEnabled(event.type)) {
+        if (!settings.masterEnabled) {
+            return
+        }
+
+        if (event is IslandEvent.MusicSessionEnded) {
+            handleMusicSessionEnded()
+            return
+        }
+
+        if (!settings.isEventEnabled(event.type)) {
+            return
+        }
+
+        if (event is IslandEvent.BluetoothChanged &&
+            settings.bluetoothAudioOnly &&
+            !event.isAudioDevice
+        ) {
             return
         }
 
@@ -65,10 +81,15 @@ class IslandStateManager(
         if (current == null || current is IslandEvent.MusicPlayback) {
             showImmediate(event, IslandDisplayMode.COMPACT)
         } else {
-            if (eventQueue.size >= 4) {
-                eventQueue.removeFirst()
+            val existingIndex = eventQueue.indexOfFirst { it.type == event.type }
+            if (existingIndex >= 0) {
+                eventQueue[existingIndex] = event
+            } else {
+                if (eventQueue.size >= 4) {
+                    eventQueue.removeFirst()
+                }
+                eventQueue.addLast(event)
             }
-            eventQueue.addLast(event)
             _uiState.update { it.copy(queuedCount = eventQueue.size) }
         }
     }
@@ -147,26 +168,42 @@ class IslandStateManager(
         }
     }
 
+    private fun handleMusicSessionEnded() {
+        postExitShrinkJob?.cancel()
+        val state = _uiState.value
+        val wasMusicActive = state.activeEvent is IslandEvent.MusicPlayback
+        if (wasMusicActive) {
+            _uiState.update { it.copy(persistentMusic = null) }
+            advanceOrCollapse()
+        } else {
+            _uiState.update { it.copy(persistentMusic = null) }
+        }
+    }
+
     private fun handleMusicUpdate(music: IslandEvent.MusicPlayback) {
+        if (music.title.isBlank()) {
+            handleMusicSessionEnded()
+            return
+        }
+
         _uiState.update { state ->
-            val isEmptyReset = !music.isPlaying && music.title.isBlank()
-            val updatedMusic = if (isEmptyReset) null else music
-            val shouldPromote = state.activeEvent == null || state.activeEvent is IslandEvent.MusicPlayback
+            val isMusicActive = state.activeEvent is IslandEvent.MusicPlayback
+            val shouldPromote = state.activeEvent == null || isMusicActive
             if (shouldPromote) {
+                val isExpanded = state.displayMode == IslandDisplayMode.EXPANDED ||
+                    state.displayMode == IslandDisplayMode.FULL_EXPANDED
                 val targetMode = when {
-                    updatedMusic == null -> IslandDisplayMode.IDLE
-                    state.displayMode == IslandDisplayMode.EXPANDED ||
-                        state.displayMode == IslandDisplayMode.FULL_EXPANDED -> state.displayMode
-                    updatedMusic.isPlaying -> IslandDisplayMode.COMPACT
+                    isExpanded -> state.displayMode
+                    music.isPlaying -> IslandDisplayMode.COMPACT
                     else -> IslandDisplayMode.IDLE
                 }
                 state.copy(
-                    activeEvent = if (targetMode == IslandDisplayMode.IDLE) null else updatedMusic,
-                    persistentMusic = updatedMusic,
+                    activeEvent = if (targetMode == IslandDisplayMode.IDLE) null else music,
+                    persistentMusic = music,
                     displayMode = targetMode
                 )
             } else {
-                state.copy(persistentMusic = updatedMusic)
+                state.copy(persistentMusic = music)
             }
         }
     }
@@ -227,11 +264,22 @@ class IslandStateManager(
         }
     }
 
+    private fun resolveExpandableCandidate(state: IslandUiState): IslandEvent? {
+        val candidate = state.activeEvent ?: state.persistentMusic
+        if (candidate is IslandEvent.MusicPlayback && candidate.title.isBlank()) {
+            return null
+        }
+        if (candidate is IslandEvent.MusicSessionEnded) {
+            return null
+        }
+        return candidate
+    }
+
     fun onIslandTap() {
         scope.launch {
             postExitShrinkJob?.cancel()
             val state = _uiState.value
-            val active = state.activeEvent ?: state.persistentMusic
+            val active = resolveExpandableCandidate(state)
             when (state.displayMode) {
                 IslandDisplayMode.IDLE -> {
                     if (active != null) {
@@ -245,9 +293,13 @@ class IslandStateManager(
                     }
                 }
                 IslandDisplayMode.COMPACT -> {
+                    if (active == null) {
+                        collapseInternal()
+                        return@launch
+                    }
                     autoCollapseJob?.cancel()
-                    _uiState.update { it.copy(displayMode = IslandDisplayMode.EXPANDED) }
-                    if (active != null && !active.isSticky) {
+                    _uiState.update { it.copy(activeEvent = active, displayMode = IslandDisplayMode.EXPANDED) }
+                    if (!active.isSticky) {
                         scheduleAutoCollapse(settingsProvider().displayDuration.millis + 2000L)
                     }
                 }
@@ -261,7 +313,7 @@ class IslandStateManager(
         scope.launch {
             postExitShrinkJob?.cancel()
             val state = _uiState.value
-            val active = state.activeEvent ?: state.persistentMusic ?: return@launch
+            val active = resolveExpandableCandidate(state) ?: return@launch
             autoCollapseJob?.cancel()
             _uiState.update {
                 it.copy(

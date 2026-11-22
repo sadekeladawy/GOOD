@@ -38,7 +38,8 @@ export type IslandEvent =
   | { id: string; type: 'AIRPLANE_MODE'; enabled: boolean }
   | { id: string; type: 'RINGER_MODE'; mode: RingerMode }
   | { id: string; type: 'INCOMING_CALL'; callerName: string; phoneNumber: string }
-  | { id: string; type: 'MUSIC_PLAYER'; track: MusicTrack };
+  | { id: string; type: 'MUSIC_PLAYER'; track: MusicTrack }
+  | { id: string; type: 'MUSIC_SESSION_ENDED' };
 
 export type AppTransitionDirection = 'EXIT_TO_ISLAND' | 'ENTER_FROM_ISLAND';
 
@@ -54,6 +55,7 @@ export interface IslandSettings {
   masterEnabled: boolean;
   autoStartOnBoot: boolean;
   hideInFullscreen: boolean;
+  bluetoothAudioOnly: boolean;
   appExitAnimationEnabled: boolean;
   animationSpeed: number;
   displayDurationSec: DisplayDurationSeconds;
@@ -99,6 +101,7 @@ export function createDefaultSettings(): IslandSettings {
     masterEnabled: true,
     autoStartOnBoot: true,
     hideInFullscreen: true,
+    bluetoothAudioOnly: true,
     appExitAnimationEnabled: true,
     animationSpeed: 1.0,
     displayDurationSec: 4,

@@ -1,5 +1,6 @@
 package com.island.app.ui.overlay
 
+import android.os.SystemClock
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -59,11 +60,14 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -113,6 +117,7 @@ fun EventCardContent(
         is IslandEvent.RingerModeChanged -> RingerModeCard(event, displayMode)
         is IslandEvent.IncomingCall -> IncomingCallCard(event, displayMode, onCallCommand)
         is IslandEvent.MusicPlayback -> MusicPlayerCard(event, displayMode, onMediaCommand)
+        is IslandEvent.MusicSessionEnded -> Unit
     }
 }
 
@@ -666,15 +671,6 @@ private fun MusicPlayerCard(
             AnimatedEqualizer(isPlaying = event.isPlaying, color = IslandViolet)
         }
     } else {
-        val safeDuration = event.durationMs.coerceAtLeast(1L)
-        val rawProgress = event.positionMs.toFloat() / safeDuration.toFloat()
-        val liveProgress = if (rawProgress.isFinite()) rawProgress.coerceIn(0f, 1f) else 0f
-
-        var isScrubbing by remember(event.packageName, event.title) { mutableStateOf(false) }
-        var scrubFraction by remember(event.packageName, event.title) { mutableFloatStateOf(liveProgress) }
-        val displayedProgress = if (isScrubbing) scrubFraction else liveProgress
-        val displayedPositionMs = (displayedProgress * safeDuration).toLong().coerceIn(0L, safeDuration)
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -711,45 +707,10 @@ private fun MusicPlayerCard(
                 AnimatedEqualizer(isPlaying = event.isPlaying, color = IslandViolet)
             }
 
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Slider(
-                    value = displayedProgress,
-                    onValueChange = { fraction ->
-                        isScrubbing = true
-                        scrubFraction = fraction.coerceIn(0f, 1f)
-                    },
-                    onValueChangeFinished = {
-                        val targetMs = (scrubFraction * safeDuration).toLong().coerceIn(0L, safeDuration)
-                        isScrubbing = false
-                        onMediaCommand(MediaCommand.SeekTo(targetMs))
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(24.dp),
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = Color.White,
-                        inactiveTrackColor = Color(0x33FFFFFF)
-                    )
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = formatMediaTime(displayedPositionMs),
-                        color = MutedWhite,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = formatMediaTime(safeDuration),
-                        color = MutedWhite,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
+            MusicProgressSection(
+                event = event,
+                onMediaCommand = onMediaCommand
+            )
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -794,6 +755,118 @@ private fun MusicPlayerCard(
     }
 }
 
+@Composable
+private fun MusicProgressSection(
+    event: IslandEvent.MusicPlayback,
+    onMediaCommand: (MediaCommand) -> Unit
+) {
+    val safeDuration = event.durationMs.coerceAtLeast(1L)
+    val basePositionMs = event.positionMs.coerceIn(0L, safeDuration)
+
+    var isScrubbing by remember(event.packageName, event.title) { mutableStateOf(false) }
+    var scrubFraction by remember(event.packageName, event.title) {
+        mutableFloatStateOf((basePositionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f))
+    }
+    var livePositionMs by remember(
+        event.packageName,
+        event.title,
+        event.positionMs,
+        event.lastPositionUpdateTimeMs,
+        event.isPlaying,
+        event.playbackSpeed
+    ) {
+        mutableLongStateOf(basePositionMs)
+    }
+
+    // Advance playback progress locally only while this expanded card is visible and playing
+    LaunchedEffect(
+        event.packageName,
+        event.title,
+        event.positionMs,
+        event.lastPositionUpdateTimeMs,
+        event.isPlaying,
+        event.playbackSpeed,
+        isScrubbing
+    ) {
+        if (!event.isPlaying || isScrubbing) {
+            livePositionMs = basePositionMs
+            return@LaunchedEffect
+        }
+        val anchorElapsedMs = if (event.lastPositionUpdateTimeMs > 0L) {
+            event.lastPositionUpdateTimeMs
+        } else {
+            SystemClock.elapsedRealtime()
+        }
+        val speed = if (event.playbackSpeed > 0f && event.playbackSpeed.isFinite()) {
+            event.playbackSpeed
+        } else {
+            1f
+        }
+        while (true) {
+            withFrameMillis {
+                val elapsedMs = (SystemClock.elapsedRealtime() - anchorElapsedMs).coerceAtLeast(0L)
+                val computed = (event.positionMs + (elapsedMs * speed).toLong()).coerceIn(0L, safeDuration)
+                if (computed != livePositionMs) {
+                    livePositionMs = computed
+                }
+            }
+            if (livePositionMs >= safeDuration) {
+                break
+            }
+        }
+    }
+
+    val rawProgress = livePositionMs.toFloat() / safeDuration.toFloat()
+    val liveProgress = if (rawProgress.isFinite()) rawProgress.coerceIn(0f, 1f) else 0f
+    val displayedProgress = if (isScrubbing) scrubFraction else liveProgress
+    val displayedPositionMs = if (isScrubbing) {
+        (scrubFraction * safeDuration).toLong().coerceIn(0L, safeDuration)
+    } else {
+        livePositionMs
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Slider(
+            value = displayedProgress,
+            onValueChange = { fraction ->
+                isScrubbing = true
+                scrubFraction = fraction.coerceIn(0f, 1f)
+            },
+            onValueChangeFinished = {
+                val targetMs = (scrubFraction * safeDuration).toLong().coerceIn(0L, safeDuration)
+                isScrubbing = false
+                livePositionMs = targetMs
+                onMediaCommand(MediaCommand.SeekTo(targetMs))
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(24.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White,
+                inactiveTrackColor = Color(0x33FFFFFF)
+            )
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = formatMediaTime(displayedPositionMs),
+                color = MutedWhite,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = formatMediaTime(safeDuration),
+                color = MutedWhite,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
 private fun formatMediaTime(millis: Long): String {
     val totalSeconds = (millis / 1000L).coerceAtLeast(0L)
     val minutes = totalSeconds / 60L
@@ -831,45 +904,65 @@ private fun AlbumArtBox(event: IslandEvent.MusicPlayback, size: Dp, corner: Dp) 
 
 @Composable
 private fun AnimatedEqualizer(isPlaying: Boolean, color: Color) {
-    val transition = rememberInfiniteTransition(label = "eq")
-    val bar1 by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(tween(420, easing = LinearEasing), RepeatMode.Reverse),
-        label = "eq1"
-    )
-    val bar2 by transition.animateFloat(
-        initialValue = 0.85f,
-        targetValue = 0.30f,
-        animationSpec = infiniteRepeatable(tween(340, easing = LinearEasing), RepeatMode.Reverse),
-        label = "eq2"
-    )
-    val bar3 by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.95f,
-        animationSpec = infiniteRepeatable(tween(490, easing = LinearEasing), RepeatMode.Reverse),
-        label = "eq3"
-    )
-    val bar4 by transition.animateFloat(
-        initialValue = 0.70f,
-        targetValue = 0.25f,
-        animationSpec = infiniteRepeatable(tween(380, easing = LinearEasing), RepeatMode.Reverse),
-        label = "eq4"
-    )
+    if (!isPlaying) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.height(16.dp)
+        ) {
+            repeat(4) {
+                Box(
+                    modifier = Modifier
+                        .width(2.5.dp)
+                        .height(14.dp)
+                        .graphicsLayer { scaleY = 0.25f }
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(color)
+                )
+            }
+        }
+        return
+    }
 
-    val levels = if (isPlaying) listOf(bar1, bar2, bar3, bar4) else listOf(0.25f, 0.25f, 0.25f, 0.25f)
+    val transition = rememberInfiniteTransition(label = "eq")
+    val barStates: List<State<Float>> = listOf(
+        transition.animateFloat(
+            initialValue = 0.25f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(tween(420, easing = LinearEasing), RepeatMode.Reverse),
+            label = "eq1"
+        ),
+        transition.animateFloat(
+            initialValue = 0.85f,
+            targetValue = 0.30f,
+            animationSpec = infiniteRepeatable(tween(340, easing = LinearEasing), RepeatMode.Reverse),
+            label = "eq2"
+        ),
+        transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 0.95f,
+            animationSpec = infiniteRepeatable(tween(490, easing = LinearEasing), RepeatMode.Reverse),
+            label = "eq3"
+        ),
+        transition.animateFloat(
+            initialValue = 0.70f,
+            targetValue = 0.25f,
+            animationSpec = infiniteRepeatable(tween(380, easing = LinearEasing), RepeatMode.Reverse),
+            label = "eq4"
+        )
+    )
 
     Row(
         horizontalArrangement = Arrangement.spacedBy(2.5.dp),
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.height(16.dp)
     ) {
-        levels.forEach { level ->
+        barStates.forEach { levelState ->
             Box(
                 modifier = Modifier
                     .width(2.5.dp)
                     .height(14.dp)
-                    .graphicsLayer { scaleY = level }
+                    .graphicsLayer { scaleY = levelState.value }
                     .clip(RoundedCornerShape(1.5.dp))
                     .background(color)
             )

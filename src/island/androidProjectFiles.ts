@@ -1,5 +1,3 @@
-import JSZip from 'jszip';
-
 import settingsGradle from '../../android-project/settings.gradle.kts?raw';
 import rootBuildGradle from '../../android-project/build.gradle.kts?raw';
 import gradleProperties from '../../android-project/gradle.properties?raw';
@@ -317,6 +315,7 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
 ];
 
 export async function downloadAndroidProjectZip(): Promise<void> {
+  const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
   const root = zip.folder('Island');
   if (!root) return;

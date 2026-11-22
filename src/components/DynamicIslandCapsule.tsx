@@ -716,5 +716,8 @@ function IslandCardBody({
         </div>
       );
     }
+
+    case 'MUSIC_SESSION_ENDED':
+      return null;
   }
 }

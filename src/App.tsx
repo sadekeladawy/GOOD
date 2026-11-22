@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
-import { AndroidCodeExplorer } from './components/AndroidCodeExplorer';
 import { EventTriggerPanel } from './components/EventTriggerPanel';
 import { PhoneSimulator } from './components/PhoneSimulator';
 import { SettingsPanel } from './components/SettingsPanel';
-import { downloadAndroidProjectZip } from './island/androidProjectFiles';
+
+const AndroidCodeExplorer = lazy(() =>
+  import('./components/AndroidCodeExplorer').then((mod) => ({
+    default: mod.AndroidCodeExplorer,
+  }))
+);
 import {
   advanceOrCollapseIsland,
   clampSettings,
@@ -315,6 +319,7 @@ export default function App() {
   const handleDownloadZip = async () => {
     setDownloading(true);
     try {
+      const { downloadAndroidProjectZip } = await import('./island/androidProjectFiles');
       await downloadAndroidProjectZip();
     } finally {
       setDownloading(false);
@@ -380,7 +385,15 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
         {activeTab === 'code' ? (
-          <AndroidCodeExplorer />
+          <Suspense
+            fallback={
+              <div className="rounded-2xl border border-[#E4E7EC] bg-white p-8 text-sm text-[#64748B]">
+                Loading Android source tree...
+              </div>
+            }
+          >
+            <AndroidCodeExplorer />
+          </Suspense>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* Left Column: Live Android Overlay Simulator */}

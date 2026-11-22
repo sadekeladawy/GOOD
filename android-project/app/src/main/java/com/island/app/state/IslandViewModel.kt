@@ -44,6 +44,10 @@ class IslandViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch { repo.setHideInFullscreen(enabled) }
     }
 
+    fun setBluetoothAudioOnly(enabled: Boolean) {
+        viewModelScope.launch { repo.setBluetoothAudioOnly(enabled) }
+    }
+
     fun setAppExitAnimationEnabled(enabled: Boolean) {
         viewModelScope.launch { repo.setAppExitAnimationEnabled(enabled) }
     }

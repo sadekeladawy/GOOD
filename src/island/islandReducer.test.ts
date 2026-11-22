@@ -197,3 +197,126 @@ test('app exit and reverse enter transitions respect toggle and expand/finish cl
   state = finishAppTransition(state, 'tx-2');
   assert.equal(state.activeTransition, null);
 });
+
+test('pausing music while expanded replaces activeEvent with isPlaying=false', () => {
+  const settings = createDefaultSettings();
+  let state = createInitialIslandState();
+
+  state = enqueueIslandEvent(
+    state,
+    {
+      id: 'm1',
+      type: 'MUSIC_PLAYER',
+      track: { title: 'Midnight Refraction', artist: 'Kiasmos', isPlaying: true, positionSec: 42, durationSec: 214 },
+    },
+    settings
+  );
+  state = tapIsland(state);
+  assert.equal(state.displayMode, 'EXPANDED');
+  assert.equal(state.activeEvent?.type === 'MUSIC_PLAYER' && state.activeEvent.track.isPlaying, true);
+
+  state = enqueueIslandEvent(
+    state,
+    {
+      id: 'm2',
+      type: 'MUSIC_PLAYER',
+      track: { title: 'Midnight Refraction', artist: 'Kiasmos', isPlaying: false, positionSec: 45, durationSec: 214 },
+    },
+    settings
+  );
+  assert.equal(state.displayMode, 'EXPANDED');
+  assert.equal(state.activeEvent?.type, 'MUSIC_PLAYER');
+  assert.equal(state.activeEvent?.type === 'MUSIC_PLAYER' ? state.activeEvent.track.isPlaying : true, false);
+  assert.equal(state.persistentMusic?.isPlaying, false);
+});
+
+test('ending music session or blank track clears persistentMusic and prevents empty expansion', () => {
+  const settings = createDefaultSettings();
+  let state = createInitialIslandState();
+
+  state = enqueueIslandEvent(
+    state,
+    {
+      id: 'm1',
+      type: 'MUSIC_PLAYER',
+      track: { title: 'Tides of Glass', artist: 'Rival Consoles', isPlaying: true, positionSec: 12, durationSec: 196 },
+    },
+    settings
+  );
+  assert.equal(state.displayMode, 'COMPACT');
+
+  // Explicit MUSIC_SESSION_ENDED clears persistentMusic and returns to IDLE
+  state = enqueueIslandEvent(state, { id: 'end-1', type: 'MUSIC_SESSION_ENDED' }, settings);
+  assert.equal(state.persistentMusic, null);
+  assert.equal(state.activeEvent, null);
+  assert.equal(state.displayMode, 'IDLE');
+
+  // Tap and long-press do not expand empty music
+  state = tapIsland(state);
+  assert.equal(state.displayMode, 'IDLE');
+  assert.equal(state.activeEvent, null);
+
+  state = longPressIsland(state);
+  assert.equal(state.displayMode, 'IDLE');
+  assert.equal(state.activeEvent, null);
+
+  // Blank title music event also clears session instead of creating an empty card
+  state = enqueueIslandEvent(
+    state,
+    {
+      id: 'm2',
+      type: 'MUSIC_PLAYER',
+      track: { title: '   ', artist: '', isPlaying: false, positionSec: 0, durationSec: 0 },
+    },
+    settings
+  );
+  assert.equal(state.persistentMusic, null);
+  assert.equal(state.activeEvent, null);
+  assert.equal(state.displayMode, 'IDLE');
+});
+
+test('queue replaces duplicate event types instead of stacking duplicates and filters non-audio Bluetooth', () => {
+  const settings = createDefaultSettings();
+  let state = createInitialIslandState();
+
+  // Active event occupies capsule
+  state = enqueueIslandEvent(state, { id: 'c1', type: 'CHARGING_STARTED', batteryPercent: 50 }, settings);
+  assert.equal(state.activeEvent?.type, 'CHARGING_STARTED');
+
+  // Queue two Wi-Fi events and a Ringer event; the second Wi-Fi event should replace the first
+  state = enqueueIslandEvent(state, { id: 'w1', type: 'WIFI_CONNECTED', ssid: 'Home-2.4G' }, settings);
+  state = enqueueIslandEvent(state, { id: 'r1', type: 'RINGER_MODE', mode: 'VIBRATE' }, settings);
+  state = enqueueIslandEvent(state, { id: 'w2', type: 'WIFI_CONNECTED', ssid: 'Home-5G' }, settings);
+
+  assert.equal(state.queue.length, 2);
+  assert.equal(state.queue[0]?.type, 'WIFI_CONNECTED');
+  assert.equal(state.queue[0]?.type === 'WIFI_CONNECTED' ? state.queue[0].ssid : '', 'Home-5G');
+  assert.equal(state.queue[1]?.type, 'RINGER_MODE');
+
+  // Default bluetoothAudioOnly=true ignores non-audio Bluetooth devices
+  let btState = createInitialIslandState();
+  btState = enqueueIslandEvent(
+    btState,
+    { id: 'bt1', type: 'BLUETOOTH', deviceName: 'Smart Tracker', connected: true, isAudio: false },
+    settings
+  );
+  assert.equal(btState.activeEvent, null);
+
+  // Audio Bluetooth device still triggers card
+  btState = enqueueIslandEvent(
+    btState,
+    { id: 'bt2', type: 'BLUETOOTH', deviceName: 'Sony WH-1000XM5', connected: true, isAudio: true },
+    settings
+  );
+  assert.equal(btState.activeEvent?.type, 'BLUETOOTH');
+
+  // When bluetoothAudioOnly=false, non-audio devices are allowed
+  const allowAllSettings = { ...settings, bluetoothAudioOnly: false };
+  let allBtState = createInitialIslandState();
+  allBtState = enqueueIslandEvent(
+    allBtState,
+    { id: 'bt3', type: 'BLUETOOTH', deviceName: 'Smart Watch', connected: true, isAudio: false },
+    allowAllSettings
+  );
+  assert.equal(allBtState.activeEvent?.type, 'BLUETOOTH');
+});
